@@ -122,6 +122,14 @@ static bool __guac_telnet_regex_search(guac_client* client, regex_t* regex, char
     length += size;
     line_buffer[length] = '\0';
 
+    //Remove combination of SOH + \0 as it breaks regexp matching
+    for (int i = 0; i < length; i++) {
+        if (line_buffer[i] == 0x01 && line_buffer[i+1] == '\0') {
+            line_buffer[i] = ' ';
+            line_buffer[i+1] = ' ';
+        }
+    }
+
     /* Send value upon match */
     if (regexec(regex, line_buffer, 0, NULL, 0) == 0) {
 
