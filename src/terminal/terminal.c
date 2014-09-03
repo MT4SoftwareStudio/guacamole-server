@@ -145,6 +145,14 @@ static void __guac_terminal_force_break(guac_terminal* terminal, int row, int ed
 
 }
 
+void __guac_terminal_log_write(guac_terminal* terminal, const char* c, int size)
+{
+    if (terminal->log_fd != NULL) {
+        fwrite(c, size, 1, terminal->log_fd);
+        fflush(terminal->log_fd);
+    }
+}
+
 void guac_terminal_reset(guac_terminal* term) {
 
     int row;
@@ -199,6 +207,7 @@ guac_terminal* guac_terminal_create(guac_client* client,
 
     guac_terminal* term = malloc(sizeof(guac_terminal));
     term->client = client;
+    term->log_fd = NULL;
     term->upload_path_handler = NULL;
     term->file_download_handler = NULL;
 
@@ -281,6 +290,10 @@ void guac_terminal_free(guac_terminal* term) {
     close(term->stdin_pipe_fd[1]);
     close(term->stdin_pipe_fd[0]);
 
+    /* Close log file */
+    if (term->log_fd != NULL)
+        fclose(term->log_fd);
+
     /* Free display */
     guac_terminal_display_free(term->display);
 
@@ -358,6 +371,7 @@ int guac_terminal_read_stdin(guac_terminal* terminal, char* c, int size) {
 }
 
 int guac_terminal_write_stdout(guac_terminal* terminal, const char* c, int size) {
+    __guac_terminal_log_write(terminal, c, size);
     return guac_terminal_write_all(terminal->stdout_pipe_fd[1], c, size);
 }
 
@@ -1479,3 +1493,14 @@ int guac_terminal_next_tab(guac_terminal* term, int column) {
     return tabstop;
 }
 
+int guac_terminal_set_log_file(guac_terminal* term, char* path) {
+    if (term->log_fd) {
+        fclose(term->log_fd);
+    }
+
+    term->log_fd = fopen(path, "a");
+    if (term->log_fd == NULL) {
+        return 1;
+    }
+    return 0;
+}

@@ -321,6 +321,10 @@ struct guac_terminal {
      */
     guac_common_clipboard* clipboard;
 
+    /**
+     * Log file descriptor
+     */
+    FILE* log_fd;
 };
 
 /**
@@ -557,6 +561,11 @@ void guac_terminal_clear_tabs(guac_terminal* term);
  * next tabstop (or the rightmost character, if no more tabstops exist).
  */
 int guac_terminal_next_tab(guac_terminal* term, int column);
+
+/**
+ * Set the log file in which the temrinal must write. Returns 0 on success or 1 on error
+ */
+int guac_terminal_set_log_file(guac_terminal* term, char* path);
 
 #endif
 

@@ -148,7 +148,6 @@ typedef struct ssh_guac_client_data {
      * The terminal which will render all output from the SSH client.
      */
     guac_terminal* term;
-   
 } ssh_guac_client_data;
 
 #endif
