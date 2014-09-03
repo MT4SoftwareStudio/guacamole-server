@@ -106,14 +106,25 @@ static void __kbd_callback(const char *name, int name_len,
 
     guac_client* client = (guac_client*) *abstract;
     ssh_guac_client_data* client_data = (ssh_guac_client_data*) client->data;
+    char* title;
+    char answer[1024];
 
-    if (num_prompts == 1) {
-        responses[0].text = strdup(client_data->password);
-        responses[0].length = strlen(client_data->password);
+    for (int i = 0; i < num_prompts; i++) {
+        title = strndup(prompts[i].text, prompts[i].length);
+
+        //If it's the "Password:" prompt, input user password (if given)
+        if (strncmp(title, GUAC_SSH_DEFAULT_PASSWORD_PROMPT, strlen(GUAC_SSH_DEFAULT_PASSWORD_PROMPT)) == 0 && client_data->password[0] != 0) {
+            responses[i].text = strdup(client_data->password);
+            responses[i].length = strlen(client_data->password);
+        }
+        //If not, ask the user for the answer
+        else {
+            guac_terminal_prompt(client_data->term, title, answer, sizeof(answer), prompts[i].echo);
+            responses[i].text = strdup(answer);
+            responses[i].length = strlen(answer);
+        }
+        free(title);
     }
-    else
-        guac_client_log_info(client, "Unsupported number of keyboard-interactive prompts: %i", num_prompts);
-
 }
 
 static LIBSSH2_SESSION* __guac_ssh_create_session(guac_client* client,

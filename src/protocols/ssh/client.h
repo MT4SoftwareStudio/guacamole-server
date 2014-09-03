@@ -40,6 +40,8 @@
 #include <pthread.h>
 #include <stdbool.h>
 
+#define GUAC_SSH_DEFAULT_PASSWORD_PROMPT "Password:"
+
 /**
  * SSH-specific client data.
  */
