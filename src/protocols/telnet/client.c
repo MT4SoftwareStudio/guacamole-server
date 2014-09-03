@@ -53,6 +53,7 @@ const char* GUAC_CLIENT_ARGS[] = {
     "password-regex",
     "font-name",
     "font-size",
+    "log-file",
     NULL
 };
 
@@ -99,6 +100,11 @@ enum __TELNET_ARGS_IDX {
      * The size of the font to use within the terminal, in points.
      */
     IDX_FONT_SIZE,
+
+    /**
+     * Log file
+     */
+    IDX_LOG_FILE,
 
     TELNET_ARGS_COUNT
 };
@@ -206,6 +212,15 @@ int guac_client_init(guac_client* client, int argc, char** argv) {
     if (client_data->term == NULL) {
         guac_client_abort(client, GUAC_PROTOCOL_STATUS_SERVER_ERROR, "Terminal initialization failed");
         return -1;
+    }
+
+    /* Configure terminal log file */
+    if (argv[IDX_LOG_FILE][0] != 0) {
+        if (guac_terminal_set_log_file(client_data->term, argv[IDX_LOG_FILE]) != 0) {
+            guac_client_log_error(client, "Error opening log file '%s' for write. Logging disabled.", argv[IDX_LOG_FILE]);
+        } else {
+            guac_client_log_info(client, "Logging to file: '%s'", argv[IDX_LOG_FILE]);
+        }
     }
 
     /* Send initial name */
