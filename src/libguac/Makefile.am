@@ -1,5 +1,5 @@
 #
-# Copyright (C) 2013 Glyptodon LLC
+# Copyright (C) 2015 Glyptodon LLC
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -22,51 +22,59 @@
 
 AUTOMAKE_OPTIONS = foreign 
 ACLOCAL_AMFLAGS = -I m4
-AM_CFLAGS = -Werror -Wall -pedantic -Iguacamole
+
+lib_LTLIBRARIES = libguac.la
 
 libguacincdir = $(includedir)/guacamole
+
 libguacinc_HEADERS =                  \
     guacamole/audio.h                 \
     guacamole/audio-fntypes.h         \
     guacamole/audio-types.h           \
-	guacamole/client-constants.h      \
+    guacamole/client-constants.h      \
     guacamole/client.h                \
-	guacamole/client-fntypes.h        \
-	guacamole/client-types.h          \
+    guacamole/client-fntypes.h        \
+    guacamole/client-types.h          \
     guacamole/error.h                 \
-	guacamole/error-types.h           \
+    guacamole/error-types.h           \
     guacamole/hash.h                  \
-	guacamole/instruction-constants.h \
+    guacamole/instruction-constants.h \
     guacamole/instruction.h           \
-	guacamole/instruction-types.h     \
+    guacamole/instruction-types.h     \
     guacamole/layer.h                 \
-	guacamole/layer-types.h           \
-	guacamole/plugin-constants.h      \
+    guacamole/layer-types.h           \
+    guacamole/object.h                \
+    guacamole/object-types.h          \
+    guacamole/plugin-constants.h      \
     guacamole/plugin.h                \
-	guacamole/plugin-types.h          \
+    guacamole/plugin-types.h          \
     guacamole/pool.h                  \
-	guacamole/pool-types.h            \
+    guacamole/pool-types.h            \
     guacamole/protocol.h              \
-	guacamole/protocol-types.h        \
-	guacamole/socket-constants.h      \
+    guacamole/protocol-types.h        \
+    guacamole/socket-constants.h      \
     guacamole/socket.h                \
-	guacamole/socket-fntypes.h        \
-	guacamole/socket-types.h          \
+    guacamole/socket-fntypes.h        \
+    guacamole/socket-types.h          \
     guacamole/stream.h                \
-	guacamole/stream-types.h          \
+    guacamole/stream-types.h          \
     guacamole/timestamp.h             \
-	guacamole/timestamp-types.h       \
+    guacamole/timestamp-types.h       \
     guacamole/unicode.h
 
 noinst_HEADERS =      \
     client-handlers.h \
+    encode-jpeg.h     \
+    encode-png.h      \
     palette.h         \
-    wav_encoder.h
+    raw_encoder.h
 
 libguac_la_SOURCES =  \
     audio.c           \
     client.c          \
     client-handlers.c \
+    encode-jpeg.c     \
+    encode-png.c      \
     error.c           \
     hash.c            \
     instruction.c     \
@@ -74,20 +82,32 @@ libguac_la_SOURCES =  \
     plugin.c          \
     pool.c            \
     protocol.c        \
+    raw_encoder.c     \
     socket.c          \
     socket-fd.c       \
     socket-nest.c     \
     timestamp.c       \
-    unicode.c         \
-    wav_encoder.c
+    unicode.c
 
-# Compile OGG support if available
-if ENABLE_OGG
-libguac_la_SOURCES += ogg_encoder.c
-noinst_HEADERS += ogg_encoder.h
+# Compile WebP support if available
+if ENABLE_WEBP
+libguac_la_SOURCES += encode-webp.c
+noinst_HEADERS += encode-webp.h
 endif
 
-lib_LTLIBRARIES = libguac.la
-libguac_la_LDFLAGS = -version-info 8:0:1 @PTHREAD_LIBS@ @CAIRO_LIBS@ @PNG_LIBS@ @VORBIS_LIBS@ @UUID_LIBS@
-libguac_la_LIBADD = @LIBADD_DLOPEN@ 
 
+libguac_la_CFLAGS = \
+    -Werror -Wall -pedantic -Iguacamole
+
+libguac_la_LDFLAGS =     \
+    -version-info 10:0:0 \
+    @CAIRO_LIBS@         \
+    @JPEG_LIBS@          \
+    @PNG_LIBS@           \
+    @PTHREAD_LIBS@       \
+    @UUID_LIBS@          \
+    @VORBIS_LIBS@        \
+    @WEBP_LIBS@
+
+libguac_la_LIBADD = \
+    @LIBADD_DLOPEN@ 

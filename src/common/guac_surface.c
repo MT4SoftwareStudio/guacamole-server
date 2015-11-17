@@ -25,12 +25,15 @@
 #include "guac_surface.h"
 
 #include <cairo/cairo.h>
+#include <guacamole/client.h>
 #include <guacamole/layer.h>
 #include <guacamole/protocol.h>
 #include <guacamole/socket.h>
+#include <guacamole/timestamp.h>
 
 #include <stdlib.h>
 #include <stdint.h>
+#include <string.h>
 
 /**
  * The width of an update which should be considered negible and thus
@@ -77,20 +80,97 @@
 #endif
 
 /**
- * Updates the coordinates of the given rectangle to be within the bounds of the given surface.
- * 
+ * The JPEG image quality ('quantization') setting to use. Range 0-100 where
+ * 100 is the highest quality/largest file size, and 0 is the lowest
+ * quality/smallest file size.
+ */
+#define GUAC_SURFACE_JPEG_IMAGE_QUALITY 90
+
+/**
+ * The framerate which, if exceeded, indicates that JPEG is preferred.
+ */
+#define GUAC_COMMON_SURFACE_JPEG_FRAMERATE 3
+
+/**
+ * Minimum JPEG bitmap size (area). If the bitmap is smaller than this threshold,
+ * it should be compressed as a PNG image to avoid the JPEG compression tax.
+ */
+#define GUAC_SURFACE_JPEG_MIN_BITMAP_SIZE 4096
+
+/**
+ * The WebP image quality ('quantization') setting to use. Range 0-100 where
+ * 100 is the highest quality/largest file size, and 0 is the lowest
+ * quality/smallest file size.
+ */
+#define GUAC_SURFACE_WEBP_IMAGE_QUALITY 90
+
+/**
+ * The JPEG compression min block size. This defines the optimal rectangle block
+ * size factor for JPEG compression. Usually 8x8 would suffice, but use 16 to
+ * reduce the occurrence of ringing artifacts further.
+ */
+#define GUAC_SURFACE_JPEG_BLOCK_SIZE 16
+
+/**
+ * The WebP compression min block size. This defines the optimal rectangle block
+ * size factor for WebP compression. WebP does utilize variable block size, but
+ * ensuring a block size factor reduces any noise on the image edges.
+ */
+#define GUAC_SURFACE_WEBP_BLOCK_SIZE 8
+
+/**
+ * Updates the coordinates of the given rectangle to be within the bounds of
+ * the given surface.
+ *
  * @param surface The surface to use for clipping.
  * @param rect The rectangle to clip.
  * @param sx The X coordinate of the source rectangle, if any.
  * @param sy The Y coordinate of the source rectangle, if any.
  */
-static void __guac_common_bound_rect(guac_common_surface* surface, guac_common_rect* rect,
-                                     int* sx, int* sy) {
+static void __guac_common_bound_rect(guac_common_surface* surface,
+        guac_common_rect* rect, int* sx, int* sy) {
+
+    guac_common_rect bounds_rect = {
+        .x = 0,
+        .y = 0,
+        .width  = surface->width,
+        .height = surface->height
+    };
 
     int orig_x = rect->x;
     int orig_y = rect->y;
 
-    guac_common_rect_constrain(rect, &surface->bounds_rect);
+    guac_common_rect_constrain(rect, &bounds_rect);
+
+    /* Update source X/Y if given */
+    if (sx != NULL) *sx += rect->x - orig_x;
+    if (sy != NULL) *sy += rect->y - orig_y;
+
+}
+
+/**
+ * Updates the coordinates of the given rectangle to be within the clipping
+ * rectangle of the given surface, which must always be within the bounding
+ * rectangle of the given surface.
+ *
+ * @param surface The surface to use for clipping.
+ * @param rect The rectangle to clip.
+ * @param sx The X coordinate of the source rectangle, if any.
+ * @param sy The Y coordinate of the source rectangle, if any.
+ */
+static void __guac_common_clip_rect(guac_common_surface* surface,
+        guac_common_rect* rect, int* sx, int* sy) {
+
+    int orig_x = rect->x;
+    int orig_y = rect->y;
+
+    /* Just bound within surface if no clipping rectangle applied */
+    if (!surface->clipped) {
+        __guac_common_bound_rect(surface, rect, sx, sy);
+        return;
+    }
+
+    guac_common_rect_constrain(rect, &surface->clip_rect);
 
     /* Update source X/Y if given */
     if (sx != NULL) *sx += rect->x - orig_x;
@@ -183,22 +263,294 @@ static void __guac_common_mark_dirty(guac_common_surface* surface, const guac_co
 }
 
 /**
- * Flushes the PNG update currently described by the dirty rectangle within the
- * given surface to that surface's PNG queue. There MUST be space within the
+ * Calculate the current average framerate for a given area on the surface.
+ *
+ * @param surface
+ *     The surface on which the framerate will be calculated.
+ *
+ * @param rect
+ *     The rect containing the area for which the average framerate will be 
+ *     calculated.
+ *
+ * @return
+ *     The average framerate of the given area, in frames per second.
+ */
+static unsigned int __guac_common_surface_calculate_framerate(
+        guac_common_surface* surface, const guac_common_rect* rect) {
+
+    int x, y;
+
+    /* Calculate minimum X/Y coordinates intersecting given rect */
+    int min_x = rect->x / GUAC_COMMON_SURFACE_HEAT_CELL_SIZE;
+    int min_y = rect->y / GUAC_COMMON_SURFACE_HEAT_CELL_SIZE;
+
+    /* Calculate maximum X/Y coordinates intersecting given rect */
+    int max_x = min_x + (rect->width  - 1) / GUAC_COMMON_SURFACE_HEAT_CELL_SIZE;
+    int max_y = min_y + (rect->height - 1) / GUAC_COMMON_SURFACE_HEAT_CELL_SIZE;
+
+    unsigned int sum_framerate = 0;
+    unsigned int count = 0;
+
+    /* Get start of buffer at given coordinates */
+    const guac_common_surface_heat_cell* heat_row =
+        surface->heat_map + min_y * surface->width + min_x;
+
+    /* Iterate over all the heat map cells for the area
+     * and calculate the average framerate */
+    for (y = min_y; y < max_y; y++) {
+
+        /* Get current row of heat map */
+        const guac_common_surface_heat_cell* heat_cell = heat_row;
+
+        /* For each cell in subset of row */
+        for (x = min_x; x < max_x; x++) {
+
+            /* Calculate indicies for latest and oldest history entries */
+            int oldest_entry = heat_cell->oldest_entry;
+            int latest_entry = oldest_entry - 1;
+            if (latest_entry < 0)
+                latest_entry = GUAC_COMMON_SURFACE_HEAT_CELL_HISTORY_SIZE - 1;
+
+            /* Calculate elapsed time covering entire history for this cell */
+            int elapsed_time = heat_cell->history[latest_entry]
+                             - heat_cell->history[oldest_entry];
+
+            /* Calculate and add framerate */
+            if (elapsed_time)
+                sum_framerate += GUAC_COMMON_SURFACE_HEAT_CELL_HISTORY_SIZE
+                    * 1000 / elapsed_time;
+
+            /* Next heat map cell */
+            heat_cell++;
+            count++;
+
+        }
+
+        /* Next heat map row */
+        heat_row += surface->width;
+
+    }
+
+    /* Calculate the average framerate over entire rect */
+    if (count)
+        return sum_framerate / count;
+
+    return 0;
+
+}
+
+ /**
+ * Guesses whether a rectangle within a particular surface would be better
+ * compressed as PNG or using a lossy format like JPEG. Positive values
+ * indicate PNG is likely to be superior, while negative values indicate the
+ * opposite.
+ *
+ * @param surface
+ *     The surface containing the image data to check.
+ *
+ * @param rect
+ *     The rect to check within the given surface.
+ *
+ * @return
+ *     Positive values if PNG compression is likely to perform better than
+ *     lossy alternatives, or negative values if PNG is likely to perform
+ *     worse.
+ */
+static int __guac_common_surface_png_optimality(guac_common_surface* surface,
+        const guac_common_rect* rect) {
+
+    int x, y;
+
+    int num_same = 0;
+    int num_different = 1;
+
+    /* Get image/buffer metrics */
+    int width = rect->width;
+    int height = rect->height;
+    int stride = surface->stride;
+
+    /* Get buffer from surface */
+    unsigned char* buffer = surface->buffer + rect->y * stride + rect->x * 4;
+
+    /* Image must be at least 1x1 */
+    if (width < 1 || height < 1)
+        return 0;
+
+    /* For each row */
+    for (y = 0; y < height; y++) {
+
+        uint32_t* row = (uint32_t*) buffer;
+        uint32_t last_pixel = *(row++) | 0xFF000000;
+
+        /* For each pixel in current row */
+        for (x = 1; x < width; x++) {
+
+            /* Get next pixel */
+            uint32_t current_pixel = *(row++) | 0xFF000000;
+
+            /* Update same/different counts according to pixel value */
+            if (current_pixel == last_pixel)
+                num_same++;
+            else
+                num_different++;
+
+            last_pixel = current_pixel;
+
+        }
+
+        /* Advance to next row */
+        buffer += stride;
+
+    }
+
+    /* Return rough approximation of optimality for PNG compression */
+    return 0x100 * num_same / num_different - 0x400;
+
+}
+
+/**
+ * Returns whether the given rectangle would be optimally encoded as JPEG
+ * rather than PNG.
+ *
+ * @param surface
+ *     The surface to be queried.
+ *
+ * @param rect
+ *     The rectangle to check.
+ *
+ * @return
+ *     Non-zero if the rectangle would be optimally encoded as JPEG, zero
+ *     otherwise.
+ */
+static int __guac_common_surface_should_use_jpeg(guac_common_surface* surface,
+        const guac_common_rect* rect) {
+
+    /* Calculate the average framerate for the given rect */
+    int framerate = __guac_common_surface_calculate_framerate(surface, rect);
+
+    int rect_size = rect->width * rect->height;
+
+    /* JPEG is preferred if:
+     * - frame rate is high enough
+     * - image size is large enough
+     * - PNG is not more optimal based on image contents */
+    return framerate >= GUAC_COMMON_SURFACE_JPEG_FRAMERATE
+        && rect_size > GUAC_SURFACE_JPEG_MIN_BITMAP_SIZE
+        && __guac_common_surface_png_optimality(surface, rect) < 0;
+
+}
+
+/**
+ * Returns whether the given rectangle would be optimally encoded as WebP
+ * rather than PNG.
+ *
+ * @param surface
+ *     The surface to be queried.
+ *
+ * @param rect
+ *     The rectangle to check.
+ *
+ * @return
+ *     Non-zero if the rectangle would be optimally encoded as WebP, zero
+ *     otherwise.
+ */
+static int __guac_common_surface_should_use_webp(guac_common_surface* surface,
+        const guac_common_rect* rect) {
+
+    /* Do not use WebP if not supported */
+    if (!guac_client_supports_webp(surface->client))
+        return 0;
+
+    /* Calculate the average framerate for the given rect */
+    int framerate = __guac_common_surface_calculate_framerate(surface, rect);
+
+    /* WebP is preferred if:
+     * - frame rate is high enough
+     * - PNG is not more optimal based on image contents */
+    return framerate >= GUAC_COMMON_SURFACE_JPEG_FRAMERATE
+        && __guac_common_surface_png_optimality(surface, rect) < 0;
+
+}
+
+/**
+ * Updates the heat map cells which intersect the given rectangle using the
+ * given timestamp. This timestamp, along with timestamps from past updates,
+ * is used to calculate the framerate of each heat cell.
+ *
+ * @param surface
+ *     The surface containing the heat map cells to be updated.
+ *
+ * @param rect
+ *     The rectangle containing the heat map cells to be updated.
+ *
+ * @param time
+ *     The timestamp to use when updating the heat map cells which intersect
+ *     the given rectangle.
+ */
+static void __guac_common_surface_touch_rect(guac_common_surface* surface,
+        guac_common_rect* rect, guac_timestamp time) {
+
+    int x, y;
+
+    /* Calculate minimum X/Y coordinates intersecting given rect */
+    int min_x = rect->x / GUAC_COMMON_SURFACE_HEAT_CELL_SIZE;
+    int min_y = rect->y / GUAC_COMMON_SURFACE_HEAT_CELL_SIZE;
+
+    /* Calculate maximum X/Y coordinates intersecting given rect */
+    int max_x = min_x + (rect->width  - 1) / GUAC_COMMON_SURFACE_HEAT_CELL_SIZE;
+    int max_y = min_y + (rect->height - 1) / GUAC_COMMON_SURFACE_HEAT_CELL_SIZE;
+
+    /* Get start of buffer at given coordinates */
+    guac_common_surface_heat_cell* heat_row =
+        surface->heat_map + min_y * surface->width + min_x;
+
+    /* Update all heat map cells which intersect with rectangle */
+    for (y = min_y; y <= max_y; y++) {
+
+        /* Get current row of heat map */
+        guac_common_surface_heat_cell* heat_cell = heat_row;
+
+        /* For each cell in subset of row */
+        for (x = min_x; x <= max_x; x++) {
+
+            /* Replace oldest entry with new timestamp */
+            heat_cell->history[heat_cell->oldest_entry] = time;
+
+            /* Update to next oldest entry */
+            heat_cell->oldest_entry++;
+            if (heat_cell->oldest_entry >=
+                    GUAC_COMMON_SURFACE_HEAT_CELL_HISTORY_SIZE)
+                heat_cell->oldest_entry = 0;
+
+            /* Advance to next heat map cell */
+            heat_cell++;
+
+        }
+
+        /* Next heat map row */
+        heat_row += surface->width;
+
+    }
+
+}
+
+/**
+ * Flushes the bitmap update currently described by the dirty rectangle within the
+ * given surface to that surface's bitmap queue. There MUST be space within the
  * queue.
  *
  * @param surface The surface to flush.
  */
 static void __guac_common_surface_flush_to_queue(guac_common_surface* surface) {
 
-    guac_common_surface_png_rect* rect;
+    guac_common_surface_bitmap_rect* rect;
 
     /* Do not flush if not dirty */
     if (!surface->dirty)
         return;
 
     /* Add new rect to queue */
-    rect = &(surface->png_queue[surface->png_queue_length++]);
+    rect = &(surface->bitmap_queue[surface->bitmap_queue_length++]);
     rect->rect = surface->dirty_rect;
     rect->flushed = 0;
 
@@ -215,7 +567,7 @@ void guac_common_surface_flush_deferred(guac_common_surface* surface) {
 
     /* Flush if queue size has reached maximum (space is reserved for the final dirty rect,
      * as guac_common_surface_flush() MAY add an additional rect to the queue */
-    if (surface->png_queue_length == GUAC_COMMON_SURFACE_QUEUE_SIZE-1)
+    if (surface->bitmap_queue_length == GUAC_COMMON_SURFACE_QUEUE_SIZE-1)
         guac_common_surface_flush(surface);
 
     /* Append dirty rect to queue */
@@ -399,8 +751,8 @@ static void __guac_common_surface_put(unsigned char* src_buffer, int src_stride,
 
     int x, y;
 
-    int min_x = rect->width - 1;
-    int min_y = rect->height - 1;
+    int min_x = rect->width;
+    int min_y = rect->height;
     int max_x = 0;
     int max_y = 0;
 
@@ -622,20 +974,23 @@ static void __guac_common_surface_transfer(guac_common_surface* src, int* sx, in
 
 }
 
-guac_common_surface* guac_common_surface_alloc(guac_socket* socket, const guac_layer* layer, int w, int h) {
+guac_common_surface* guac_common_surface_alloc(guac_client* client,
+        guac_socket* socket, const guac_layer* layer, int w, int h) {
 
     /* Init surface */
-    guac_common_surface* surface = malloc(sizeof(guac_common_surface));
-    surface->layer = layer;
+    guac_common_surface* surface = calloc(1, sizeof(guac_common_surface));
+    surface->client = client;
     surface->socket = socket;
+    surface->layer = layer;
     surface->width = w;
     surface->height = h;
-    surface->dirty = 0;
-    surface->png_queue_length = 0;
 
     /* Create corresponding Cairo surface */
     surface->stride = cairo_format_stride_for_width(CAIRO_FORMAT_RGB24, w);
     surface->buffer = calloc(h, surface->stride);
+
+    /* Create corresponding heat map */
+    surface->heat_map = calloc(w*h, sizeof(guac_common_surface_heat_cell));
 
     /* Reset clipping rect */
     guac_common_surface_reset_clip(surface);
@@ -659,6 +1014,7 @@ void guac_common_surface_free(guac_common_surface* surface) {
     if (surface->realized)
         guac_protocol_send_dispose(surface->socket, surface->layer);
 
+    free(surface->heat_map);
     free(surface->buffer);
     free(surface);
 
@@ -686,18 +1042,22 @@ void guac_common_surface_resize(guac_common_surface* surface, int w, int h) {
     surface->height = h;
     surface->stride = cairo_format_stride_for_width(CAIRO_FORMAT_RGB24, w);
     surface->buffer = calloc(h, surface->stride);
-    guac_common_surface_reset_clip(surface);
+    __guac_common_bound_rect(surface, &surface->clip_rect, NULL, NULL);
 
     /* Copy relevant old data */
-    guac_common_rect_constrain(&old_rect, &surface->bounds_rect);
+    __guac_common_bound_rect(surface, &old_rect, NULL, NULL);
     __guac_common_surface_put(old_buffer, old_stride, &sx, &sy, surface, &old_rect, 1);
 
     /* Free old data */
     free(old_buffer);
 
-    /* Clip dirty rect */
+    /* Allocate completely new heat map (can safely discard old stats) */
+    free(surface->heat_map);
+    surface->heat_map = calloc(w*h, sizeof(guac_common_surface_heat_cell));
+
+    /* Resize dirty rect to fit new surface dimensions */
     if (surface->dirty) {
-        guac_common_rect_constrain(&surface->dirty_rect, &surface->bounds_rect);
+        __guac_common_bound_rect(surface, &surface->dirty_rect, NULL, NULL);
         if (surface->dirty_rect.width <= 0 || surface->dirty_rect.height <= 0)
             surface->dirty = 0;
     }
@@ -723,7 +1083,7 @@ void guac_common_surface_draw(guac_common_surface* surface, int x, int y, cairo_
     guac_common_rect_init(&rect, x, y, w, h);
 
     /* Clip operation */
-    __guac_common_bound_rect(surface, &rect, &sx, &sy);
+    __guac_common_clip_rect(surface, &rect, &sx, &sy);
     if (rect.width <= 0 || rect.height <= 0)
         return;
 
@@ -731,6 +1091,10 @@ void guac_common_surface_draw(guac_common_surface* surface, int x, int y, cairo_
     __guac_common_surface_put(buffer, stride, &sx, &sy, surface, &rect, format != CAIRO_FORMAT_ARGB32);
     if (rect.width <= 0 || rect.height <= 0)
         return;
+
+    /* Update the heat map for the update rectangle. */
+    guac_timestamp time = guac_timestamp_current();
+    __guac_common_surface_touch_rect(surface, &rect, time);
 
     /* Flush if not combining */
     if (!__guac_common_should_combine(surface, &rect, 0))
@@ -756,7 +1120,7 @@ void guac_common_surface_paint(guac_common_surface* surface, int x, int y, cairo
     guac_common_rect_init(&rect, x, y, w, h);
 
     /* Clip operation */
-    __guac_common_bound_rect(surface, &rect, &sx, &sy);
+    __guac_common_clip_rect(surface, &rect, &sx, &sy);
     if (rect.width <= 0 || rect.height <= 0)
         return;
 
@@ -783,7 +1147,7 @@ void guac_common_surface_copy(guac_common_surface* src, int sx, int sy, int w, i
     guac_common_rect_init(&rect, dx, dy, w, h);
 
     /* Clip operation */
-    __guac_common_bound_rect(dst, &rect, &sx, &sy);
+    __guac_common_clip_rect(dst, &rect, &sx, &sy);
     if (rect.width <= 0 || rect.height <= 0)
         return;
 
@@ -824,7 +1188,7 @@ void guac_common_surface_transfer(guac_common_surface* src, int sx, int sy, int 
     guac_common_rect_init(&rect, dx, dy, w, h);
 
     /* Clip operation */
-    __guac_common_bound_rect(dst, &rect, &sx, &sy);
+    __guac_common_clip_rect(dst, &rect, &sx, &sy);
     if (rect.width <= 0 || rect.height <= 0)
         return;
 
@@ -864,7 +1228,7 @@ void guac_common_surface_rect(guac_common_surface* surface,
     guac_common_rect_init(&rect, x, y, w, h);
 
     /* Clip operation */
-    __guac_common_bound_rect(surface, &rect, NULL, NULL);
+    __guac_common_clip_rect(surface, &rect, NULL, NULL);
     if (rect.width <= 0 || rect.height <= 0)
         return;
 
@@ -891,21 +1255,29 @@ void guac_common_surface_clip(guac_common_surface* surface, int x, int y, int w,
 
     guac_common_rect clip;
 
+    /* Init clipping rectangle if clipping not already applied */
+    if (!surface->clipped) {
+        guac_common_rect_init(&surface->clip_rect, 0, 0, surface->width, surface->height);
+        surface->clipped = 1;
+    }
+
     guac_common_rect_init(&clip, x, y, w, h);
-    guac_common_rect_constrain(&surface->bounds_rect, &clip);
+    guac_common_rect_constrain(&surface->clip_rect, &clip);
 
 }
 
 void guac_common_surface_reset_clip(guac_common_surface* surface) {
-    guac_common_rect_init(&surface->bounds_rect, 0, 0, surface->width, surface->height);
+    surface->clipped = 0;
 }
 
 /**
- * Flushes the PNG update currently described by the dirty rectangle within the
- * given surface directly to a "png" instruction, which is sent on the socket
- * associated with the surface.
+ * Flushes the bitmap update currently described by the dirty rectangle within
+ * the given surface directly via an "img" instruction as PNG data. The
+ * resulting instructions will be sent over the socket associated with the
+ * given surface.
  *
- * @param surface The surface to flush.
+ * @param surface
+ *     The surface to flush.
  */
 static void __guac_common_surface_flush_to_png(guac_common_surface* surface) {
 
@@ -922,7 +1294,8 @@ static void __guac_common_surface_flush_to_png(guac_common_surface* surface) {
                                                                     surface->stride);
 
         /* Send PNG for rect */
-        guac_protocol_send_png(socket, GUAC_COMP_OVER, layer, surface->dirty_rect.x, surface->dirty_rect.y, rect);
+        guac_client_stream_png(surface->client, socket, GUAC_COMP_OVER,
+                layer, surface->dirty_rect.x, surface->dirty_rect.y, rect);
         cairo_surface_destroy(rect);
         surface->realized = 1;
 
@@ -934,15 +1307,109 @@ static void __guac_common_surface_flush_to_png(guac_common_surface* surface) {
 }
 
 /**
- * Comparator for instances of guac_common_surface_png_rect, the elements
- * which make up a surface's PNG buffer.
+ * Flushes the bitmap update currently described by the dirty rectangle within
+ * the given surface directly via an "img" instruction as JPEG data. The
+ * resulting instructions will be sent over the socket associated with the
+ * given surface.
+ *
+ * @param surface
+ *     The surface to flush.
+ */
+static void __guac_common_surface_flush_to_jpeg(guac_common_surface* surface) {
+
+    if (surface->dirty) {
+
+        guac_socket* socket = surface->socket;
+        const guac_layer* layer = surface->layer;
+
+        guac_common_rect max;
+        guac_common_rect_init(&max, 0, 0, surface->width, surface->height);
+
+        /* Expand the dirty rect size to fit in a grid with cells equal to the
+         * minimum JPEG block size */
+        guac_common_rect_expand_to_grid(GUAC_SURFACE_JPEG_BLOCK_SIZE,
+                                        &surface->dirty_rect, &max);
+
+        /* Get Cairo surface for specified rect */
+        unsigned char* buffer = surface->buffer + surface->dirty_rect.y * surface->stride + surface->dirty_rect.x * 4;
+        cairo_surface_t* rect = cairo_image_surface_create_for_data(buffer, CAIRO_FORMAT_RGB24,
+                                                                    surface->dirty_rect.width,
+                                                                    surface->dirty_rect.height,
+                                                                    surface->stride);
+
+        /* Send JPEG for rect */
+        guac_client_stream_jpeg(surface->client, socket, GUAC_COMP_OVER, layer,
+                surface->dirty_rect.x, surface->dirty_rect.y, rect,
+                GUAC_SURFACE_JPEG_IMAGE_QUALITY);
+        cairo_surface_destroy(rect);
+        surface->realized = 1;
+
+        /* Surface is no longer dirty */
+        surface->dirty = 0;
+
+    }
+
+}
+
+/**
+ * Flushes the bitmap update currently described by the dirty rectangle within
+ * the given surface directly via an "img" instruction as WebP data. The
+ * resulting instructions will be sent over the socket associated with the
+ * given surface.
+ *
+ * @param surface
+ *     The surface to flush.
+ */
+static void __guac_common_surface_flush_to_webp(guac_common_surface* surface) {
+
+    if (surface->dirty) {
+
+        guac_socket* socket = surface->socket;
+        const guac_layer* layer = surface->layer;
+
+        guac_common_rect max;
+        guac_common_rect_init(&max, 0, 0, surface->width, surface->height);
+
+        /* Expand the dirty rect size to fit in a grid with cells equal to the
+         * minimum WebP block size */
+        guac_common_rect_expand_to_grid(GUAC_SURFACE_WEBP_BLOCK_SIZE,
+                                        &surface->dirty_rect, &max);
+
+        /* Get Cairo surface for specified rect */
+        unsigned char* buffer = surface->buffer
+            + surface->dirty_rect.y * surface->stride
+            + surface->dirty_rect.x * 4;
+
+        cairo_surface_t* rect = cairo_image_surface_create_for_data(buffer,
+                CAIRO_FORMAT_RGB24,
+                surface->dirty_rect.width, surface->dirty_rect.height,
+                surface->stride);
+
+        /* Send WebP for rect */
+        guac_client_stream_webp(surface->client, socket, GUAC_COMP_OVER, layer,
+                surface->dirty_rect.x, surface->dirty_rect.y, rect,
+                GUAC_SURFACE_WEBP_IMAGE_QUALITY, 0);
+        cairo_surface_destroy(rect);
+        surface->realized = 1;
+
+        /* Surface is no longer dirty */
+        surface->dirty = 0;
+
+    }
+
+}
+
+
+/**
+ * Comparator for instances of guac_common_surface_bitmap_rect, the elements
+ * which make up a surface's bitmap buffer.
  *
  * @see qsort
  */
-static int __guac_common_surface_png_rect_compare(const void* a, const void* b) {
+static int __guac_common_surface_bitmap_rect_compare(const void* a, const void* b) {
 
-    guac_common_surface_png_rect* ra = (guac_common_surface_png_rect*) a;
-    guac_common_surface_png_rect* rb = (guac_common_surface_png_rect*) b;
+    guac_common_surface_bitmap_rect* ra = (guac_common_surface_bitmap_rect*) a;
+    guac_common_surface_bitmap_rect* rb = (guac_common_surface_bitmap_rect*) b;
 
     /* Order roughly top to bottom, left to right */
     if (ra->rect.y != rb->rect.y) return ra->rect.y - rb->rect.y;
@@ -958,36 +1425,41 @@ static int __guac_common_surface_png_rect_compare(const void* a, const void* b) 
 
 void guac_common_surface_flush(guac_common_surface* surface) {
 
-    guac_common_surface_png_rect* current = surface->png_queue;
+    /* Flush final dirty rectangle to queue. */
+    __guac_common_surface_flush_to_queue(surface);
 
+    guac_common_surface_bitmap_rect* current = surface->bitmap_queue;
     int i, j;
     int original_queue_length;
     int flushed = 0;
 
-    /* Flush final dirty rect to queue */
-    __guac_common_surface_flush_to_queue(surface);
-    original_queue_length = surface->png_queue_length;
+    original_queue_length = surface->bitmap_queue_length;
 
     /* Sort updates to make combination less costly */
-    qsort(surface->png_queue, surface->png_queue_length, sizeof(guac_common_surface_png_rect),
-          __guac_common_surface_png_rect_compare);
+    qsort(surface->bitmap_queue, surface->bitmap_queue_length, sizeof(guac_common_surface_bitmap_rect),
+          __guac_common_surface_bitmap_rect_compare);
 
     /* Flush all rects in queue */
-    for (i=0; i < surface->png_queue_length; i++) {
+    for (i=0; i < surface->bitmap_queue_length; i++) {
 
         /* Get next unflushed candidate */
-        guac_common_surface_png_rect* candidate = current;
+        guac_common_surface_bitmap_rect* candidate = current;
         if (!candidate->flushed) {
 
             int combined = 0;
 
             /* Build up rect as much as possible */
-            for (j=i; j < surface->png_queue_length; j++) {
+            for (j=i; j < surface->bitmap_queue_length; j++) {
 
                 if (!candidate->flushed) {
 
+                    /* Clip candidate within current bounds */
+                    __guac_common_bound_rect(surface, &candidate->rect, NULL, NULL);
+                    if (candidate->rect.width <= 0 || candidate->rect.height <= 0)
+                        candidate->flushed = 1;
+
                     /* Combine if reasonable */
-                    if (__guac_common_should_combine(surface, &candidate->rect, 0) || !surface->dirty) {
+                    else if (__guac_common_should_combine(surface, &candidate->rect, 0) || !surface->dirty) {
                         __guac_common_mark_dirty(surface, &candidate->rect);
                         candidate->flushed = 1;
                         combined++;
@@ -1001,13 +1473,28 @@ void guac_common_surface_flush(guac_common_surface* surface) {
 
             /* Re-add to queue if there's room and this update was modified or we expect others might be */
             if ((combined > 1 || i < original_queue_length)
-                    && surface->png_queue_length < GUAC_COMMON_SURFACE_QUEUE_SIZE)
+                    && surface->bitmap_queue_length < GUAC_COMMON_SURFACE_QUEUE_SIZE)
                 __guac_common_surface_flush_to_queue(surface);
 
-            /* Flush as PNG otherwise */
-            else {
-                if (surface->dirty) flushed++;
-                __guac_common_surface_flush_to_png(surface);
+            /* Flush as bitmap otherwise */
+            else if (surface->dirty) {
+
+                flushed++;
+
+                /* Prefer WebP when reasonable */
+                if (__guac_common_surface_should_use_webp(surface,
+                            &surface->dirty_rect))
+                    __guac_common_surface_flush_to_webp(surface);
+
+                /* If not WebP, JPEG is the next best (lossy) choice */
+                else if (__guac_common_surface_should_use_jpeg(surface,
+                            &surface->dirty_rect))
+                    __guac_common_surface_flush_to_jpeg(surface);
+
+                /* Use PNG if no lossy formats are appropriate */
+                else
+                    __guac_common_surface_flush_to_png(surface);
+
             }
 
         }
@@ -1017,7 +1504,7 @@ void guac_common_surface_flush(guac_common_surface* surface) {
     }
 
     /* Flush complete */
-    surface->png_queue_length = 0;
+    surface->bitmap_queue_length = 0;
 
 }
 

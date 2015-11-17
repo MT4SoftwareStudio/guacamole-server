@@ -121,8 +121,8 @@ void guac_vnc_cursor(rfbClient* client, int x, int y, int w, int h, int bpp) {
     /* Send cursor data*/
     surface = cairo_image_surface_create_for_data(buffer, CAIRO_FORMAT_ARGB32, w, h, stride);
     
-    guac_protocol_send_png(socket,
-            GUAC_COMP_SRC, cursor_layer, 0, 0, surface);
+    guac_client_stream_png(gc, socket, GUAC_COMP_SRC, cursor_layer,
+            0, 0, surface);
     
     /* Update cursor */
     guac_protocol_send_cursor(socket, x, y, cursor_layer, 0, 0, w, h);
@@ -305,9 +305,10 @@ void guac_vnc_cut_text(rfbClient* client, const char* text, int textlen) {
 
     const char* input = text;
     char* output = received_data;
+    guac_iconv_read* reader = client_data->clipboard_reader;
 
     /* Convert clipboard contents */
-    guac_iconv(GUAC_READ_ISO8859_1, &input, textlen,
+    guac_iconv(reader, &input, textlen,
                GUAC_WRITE_UTF8, &output, sizeof(received_data));
 
     /* Send converted data */

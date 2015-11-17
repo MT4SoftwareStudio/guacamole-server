@@ -152,6 +152,7 @@ guac_socket* guac_socket_alloc() {
     socket->__written = 0;
     socket->data = NULL;
     socket->state = GUAC_SOCKET_OPEN;
+    socket->last_write_timestamp = guac_timestamp_current();
 
     /* Init members */
     socket->__instructionbuf_unparsed_start = socket->__instructionbuf;
@@ -159,6 +160,9 @@ guac_socket* guac_socket_alloc() {
 
     /* Default to unsafe threading */
     socket->__threadsafe_instructions = 0;
+
+    /* No keep alive ping by default */
+    socket->__keep_alive_enabled = 0;
 
     pthread_mutexattr_init(&lock_attributes);
     pthread_mutexattr_setpshared(&lock_attributes, PTHREAD_PROCESS_SHARED);

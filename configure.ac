@@ -1,5 +1,5 @@
 #
-# Copyright (C) 2013 Glyptodon LLC
+# Copyright (C) 2015 Glyptodon LLC
 #
 # Permission is hereby granted, free of charge, to any person obtaining a copy
 # of this software and associated documentation files (the "Software"), to deal
@@ -21,7 +21,7 @@
 #
 
 AC_PREREQ([2.61])
-AC_INIT([guacamole-server], [0.9.2])
+AC_INIT([guacamole-server], [0.9.8])
 AM_INIT_AUTOMAKE([-Wall -Werror foreign subdir-objects])
 AM_SILENT_RULES([yes])
 
@@ -52,6 +52,10 @@ AC_CHECK_LIB([m], [cos],
 # libpng
 AC_CHECK_LIB([png], [png_write_png], [PNG_LIBS=-lpng],
              AC_MSG_ERROR("libpng is required for writing png messages"))
+
+# libjpeg
+AC_CHECK_LIB([jpeg], [jpeg_start_compress], [JPEG_LIBS=-ljpeg],
+             AC_MSG_ERROR("libjpeg is required for writing jpeg messages"))
 
 # Cairo
 AC_CHECK_LIB([cairo], [cairo_create], [CAIRO_LIBS=-lcairo],
@@ -87,6 +91,7 @@ AC_CHECK_LIB([wsock32], [main])
 AC_SUBST(LIBADD_DLOPEN)
 AC_SUBST(MATH_LIBS)
 AC_SUBST(PNG_LIBS)
+AC_SUBST(JPEG_LIBS)
 AC_SUBST(CAIRO_LIBS)
 AC_SUBST(PTHREAD_LIBS)
 AC_SUBST(UUID_LIBS)
@@ -117,17 +122,29 @@ AC_SUBST([LIBGUAC_INCLUDE], '-I$(top_srcdir)/src/libguac')
 AC_SUBST([COMMON_LTLIB],   '$(top_builddir)/src/common/libguac_common.la')
 AC_SUBST([COMMON_INCLUDE], '-I$(top_srcdir)/src/common')
 
+# Common base SSH client
+AC_SUBST([COMMON_SSH_LTLIB],   '$(top_builddir)/src/common-ssh/libguac_common_ssh.la')
+AC_SUBST([COMMON_SSH_INCLUDE], '-I$(top_srcdir)/src/common-ssh')
+
 # Terminal emulator
 AC_SUBST([TERMINAL_LTLIB],   '$(top_builddir)/src/terminal/libguac_terminal.la')
 AC_SUBST([TERMINAL_INCLUDE], '-I$(top_srcdir)/src/terminal $(PANGO_CFLAGS) $(PANGOCAIRO_CFLAGS) $(COMMON_INCLUDE)')
 
-# Options
+# Init directory
 AC_ARG_WITH(init_dir,
             [AS_HELP_STRING([--with-init-dir=<path>],
                             [install init scripts to the given directory])
             ],init_dir=$withval)
 AM_CONDITIONAL([ENABLE_INIT], [test "x${init_dir}" != "x"])
 AC_SUBST(init_dir)
+
+# guacd config file
+AC_ARG_WITH(guacd_conf,
+            [AS_HELP_STRING([--with-guacd-conf=<path>],
+                            [the full path to the guacd config file @<:@default=/etc/guacamole/guacd.conf@:>@])],
+            [guacd_conf=$withval],
+            [guacd_conf=/etc/guacamole/guacd.conf])
+AC_DEFINE_UNQUOTED([GUACD_CONF_FILE], ["$guacd_conf"], [The full path to the guacd config file])
 
 #
 # libssl
@@ -363,21 +380,25 @@ if test "x$with_rdp" != "xno"
 then
     have_winpr=yes
     have_freerdp=yes
+    have_disp=yes
     legacy_freerdp_extensions=no
     rdpsettings_interface=unknown
-    rdpsettings_fastpath=yes
+    rdpsettings_audioplayback=yes
+    rdpsettings_deviceredirection=yes
     freerdp_interface=unknown
     event_interface=unknown
 
-    # libfreerdp-core
+    # libfreerdp-core / libfreerdp
     AC_CHECK_LIB([freerdp-core], [freerdp_new],
                  [RDP_LIBS="$RDP_LIBS -lfreerdp-core"],
-                 [AC_MSG_WARN([
+                 [AC_CHECK_LIB([freerdp], [freerdp_new],
+                               [RDP_LIBS="$RDP_LIBS -lfreerdp -lfreerdp-client"],
+                               [AC_MSG_WARN([
   --------------------------------------------
-   Unable to find libfreerdp-core
+   Unable to find libfreerdp-core / libfreerdp
    RDP will be disabled.
   --------------------------------------------])
-                  have_freerdp=no])
+                  have_freerdp=no])])
 fi
 
 
@@ -385,49 +406,46 @@ fi
 if test "x${have_freerdp}" = "xyes"
 then
     AC_CHECK_LIB([freerdp-cache], [glyph_cache_register_callbacks],
-                 [RDP_LIBS="$RDP_LIBS -lfreerdp-cache"],
-                 [AC_MSG_WARN([
-  --------------------------------------------
-   Unable to find libfreerdp-cache
-   RDP will be disabled.
-  --------------------------------------------])
-                  have_freerdp=no])
+                 [RDP_LIBS="$RDP_LIBS -lfreerdp-cache"])
 fi
 
-# libfreerdp-channels (1.0) / libfreerdp-client (1.1)
+# libfreerdp-channels (1.0) / libfreerdp-client + libfreerdp-core (1.1)
 if test "x${have_freerdp}" = "xyes"
 then
     AC_CHECK_LIB([freerdp-client], [freerdp_channels_new],
                  [RDP_LIBS="$RDP_LIBS -lfreerdp-client"],
                  [AC_CHECK_LIB([freerdp-channels], [freerdp_channels_new],
                                [RDP_LIBS="$RDP_LIBS -lfreerdp-channels"
-                               legacy_freerdp_extensions=yes])])
+                               legacy_freerdp_extensions=yes])],
+                 [-lfreerdp-core])
 fi
 
 # libfreerdp-utils
 if test "x${have_freerdp}" = "xyes"
 then
     AC_CHECK_LIB([freerdp-utils], [svc_plugin_init],
-                 [RDP_LIBS="$RDP_LIBS -lfreerdp-utils"],
-                 [AC_MSG_WARN([
-  --------------------------------------------
-   Unable to find libfreerdp-utils
-   RDP will be disabled.
-  --------------------------------------------])
-                  have_freerdp=no])
+                 [RDP_LIBS="$RDP_LIBS -lfreerdp-utils"])
 fi
 
 # libfreerdp-codec
 if test "x${have_freerdp}" = "xyes"
 then
     AC_CHECK_LIB([freerdp-codec], [freerdp_image_convert],
-                 [RDP_LIBS="$RDP_LIBS -lfreerdp-codec"],
-                 [AC_MSG_WARN([
-  --------------------------------------------
-   Unable to find libfreerdp-codec
-   RDP will be disabled.
-  --------------------------------------------])
-                  have_freerdp=no])
+                 [RDP_LIBS="$RDP_LIBS -lfreerdp-codec"])
+fi
+
+# Available color conversion functions
+if test "x${have_freerdp}" = "xyes"
+then
+    AC_CHECK_DECL([freerdp_convert_gdi_order_color],
+        [AC_DEFINE([HAVE_FREERDP_CONVERT_GDI_ORDER_COLOR],,
+                   [Whether freerdp_convert_gdi_order_color() is defined])],,
+        [#include <freerdp/codec/color.h>])
+
+    AC_CHECK_DECL([freerdp_color_convert_drawing_order_color_to_gdi_color],
+        [AC_DEFINE([HAVE_FREERDP_COLOR_CONVERT_DRAWING_ORDER_COLOR_TO_GDI_COLOR],,
+                   [Whether freerdp_color_convert_drawing_order_color_to_gdi_color() is defined])],,
+        [#include <freerdp/codec/color.h>])
 fi
 
 # Check for interval polling in plugins
@@ -470,6 +488,28 @@ then
                                        [#include <freerdp/types.h>])],
                      [#include <winpr/wtypes.h>
                       #include <winpr/collections.h>])
+fi
+
+# Header defining display update channel
+if test "x${have_freerdp}" = "xyes"
+then
+    AC_CHECK_HEADERS([freerdp/client/disp.h],
+                     [AC_DEFINE([HAVE_FREERDP_DISPLAY_UPDATE_SUPPORT],,
+                                [Whether FreeRDP supports the display update channel])]
+                     [AC_CHECK_MEMBERS([rdpSettings.SupportDisplayControl],,,
+                                       [[#include <freerdp/freerdp.h>]])],
+                     have_disp=no,
+                     [#include <winpr/wtypes.h>
+                      #include <winpr/collections.h>])
+fi
+
+# Support for "PubSub" event system
+if test "x${have_freerdp}" = "xyes"
+then
+    AC_CHECK_DECL([PubSub_SubscribeChannelConnected],
+        [AC_DEFINE([HAVE_FREERDP_EVENT_PUBSUB],,
+                   [Whether this version of FreeRDP provides the PubSub event system])],,
+        [#include <freerdp/event.h>])
 fi
 
 # Addin registration variations
@@ -569,6 +609,7 @@ then
                       rdpSettings.Height,
                       rdpSettings.FastPathInput,
                       rdpSettings.FastPathOutput,
+                      rdpSettings.SendPreconnectionPdu,
                       rdpSettings.OrderSupport],
                      [rdpsettings_interface=stable],,
                      [[#include <freerdp/freerdp.h>]])
@@ -588,10 +629,14 @@ then
         AC_DEFINE([LEGACY_RDPSETTINGS],,
                   [Whether the legacy version of the rdpSettings API was found])
 
-        # Legacy interface may not have FastPath settings
-        AC_CHECK_MEMBERS([rdpSettings.fast_path_input,
-                          rdpSettings.fast_path_output],,
-                         [rdpsettings_fastpath=no],
+        # Legacy interface may not have AudioPlayback settings
+        AC_CHECK_MEMBERS([rdpSettings.audio_playback],,
+                         [rdpsettings_audioplayback=no],
+                         [[#include <freerdp/freerdp.h>]])
+
+        # Legacy interface may not have DeviceRedirection settings
+        AC_CHECK_MEMBERS([rdpSettings.device_redirection],,
+                         [rdpsettings_deviceredirection=no],
                          [[#include <freerdp/freerdp.h>]])
 
     elif test "x${rdpsettings_interface}" = "xunknown"; then
@@ -604,10 +649,16 @@ then
     fi
 fi
 
-# Activate FastPath settings if present
-if test "x${have_freerdp}" = "xyes" -a "x${rdpsettings_fastpath}" = "xyes"; then
-    AC_DEFINE([HAVE_RDPSETTINGS_FASTPATH],,
-              [Whether the rdpSettings structure has FastPath settings])
+# Activate audio playback settings if present
+if test "x${have_freerdp}" = "xyes" -a "x${rdpsettings_audioplayback}" = "xyes"; then
+    AC_DEFINE([HAVE_RDPSETTINGS_AUDIOPLAYBACK],,
+              [Whether the rdpSettings structure has AudioPlayback settings])
+fi
+
+# Activate device redirection settings if present
+if test "x${have_freerdp}" = "xyes" -a "x${rdpsettings_deviceredirection}" = "xyes"; then
+    AC_DEFINE([HAVE_RDPSETTINGS_DEVICEREDIRECTION],,
+              [Whether the rdpSettings structure has DeviceRedirection settings])
 fi
 
 # Check if the type CHANNEL_ENTRY_POINTS_FREERDP exists, if not define it to CHANNEL_ENTRY_POINTS_EX
@@ -647,6 +698,55 @@ then
                       [AC_MSG_RESULT([no])
                        AC_DEFINE([LEGACY_RDPBITMAP],,
                                  [Whether the legacy rdpBitmap API was found])])
+fi
+
+#
+# FreeRDP: Decompression function variants
+#
+
+# Check whether interleaved_decompress() can handle the palette
+if test "x${have_freerdp}" = "xyes"
+then
+    AC_MSG_CHECKING([whether interleaved_decompress() accepts an additional palette parameter])
+    AC_COMPILE_IFELSE([AC_LANG_SOURCE([[#include <freerdp/codec/interleaved.h>
+
+                                        int main() {
+                                            BYTE* palette = NULL;
+                                            interleaved_decompress(NULL, NULL, 0, 0, NULL, 0, 0, 0, 0, 0, 0, palette);
+                                        }]])],
+                      [AC_MSG_RESULT([yes])
+                       AC_DEFINE([INTERLEAVED_DECOMPRESS_TAKES_PALETTE],,
+                                 [Whether interleaved_decompress() accepts an additional palette parameter])],
+                      [AC_MSG_RESULT([no])])
+fi
+
+# Check whether planar_decompress() will handle flipping
+if test "x${have_freerdp}" = "xyes"
+then
+    AC_MSG_CHECKING([whether planar_decompress() can flip])
+    AC_COMPILE_IFELSE([AC_LANG_SOURCE([[#include <freerdp/codec/planar.h>
+
+                                        int main() {
+                                            BOOL* flip = TRUE;
+                                            planar_decompress(NULL, NULL, 0, NULL, 0, 0, 0, 0, 0, 0, flip);
+                                        }]])],
+                      [AC_MSG_RESULT([yes])
+                       AC_DEFINE([PLANAR_DECOMPRESS_CAN_FLIP],,
+                                 [Whether planar_decompress() can flip])],
+                      [AC_MSG_RESULT([no])])
+fi
+
+#
+# FreeRDP: rdpContext
+#
+
+# Check for rdpContext.codecs
+if test "x${have_freerdp}" = "xyes"
+then
+    AC_CHECK_MEMBERS([rdpContext.codecs],
+                     [AC_DEFINE([FREERDP_BITMAP_REQUIRES_ALIGNED_MALLOC],,
+                                [Whether this version of FreeRDP requires _aligned_malloc() for bitmap data])],,
+                     [[#include <freerdp/freerdp.h>]])
 fi
 
 #
@@ -712,6 +812,7 @@ then
 fi
 
 AM_CONDITIONAL([LEGACY_FREERDP_EXTENSIONS], [test "x${legacy_freerdp_extensions}" = "xyes"])
+AM_CONDITIONAL([ENABLE_DISPLAY_UPDATE], [test "x${have_disp}" = "xyes"])
 AM_CONDITIONAL([ENABLE_WINPR], [test "x${have_winpr}"   = "xyes"])
 AM_CONDITIONAL([ENABLE_RDP],   [test "x${have_freerdp}" = "xyes"])
 
@@ -742,6 +843,12 @@ then
                          [SSH_LIBS="$SSH_LIBS -lssh2"],
                          [have_libssh2=no])
 fi
+
+AM_CONDITIONAL([ENABLE_COMMON_SSH], [test "x${have_libssh2}"  = "xyes" \
+                                       -a "x${have_ssl}"      = "xyes"])
+AM_COND_IF([ENABLE_COMMON_SSH],
+           [AC_DEFINE([ENABLE_COMMON_SSH],,
+                      [Whether support for the common SSH core is enabled])])
 
 AM_CONDITIONAL([ENABLE_SSH], [test "x${have_libssh2}"  = "xyes" \
                                 -a "x${have_terminal}" = "xyes" \
@@ -825,10 +932,45 @@ AM_CONDITIONAL([ENABLE_TELNET], [test "x${have_libtelnet}"  = "xyes" \
 
 AC_SUBST(TELNET_LIBS)
 
+#
+# libwebp
+#
+
+have_webp=disabled
+WEBP_LIBS=
+AC_ARG_WITH([webp],
+            [AS_HELP_STRING([--with-webp],
+                            [support WebP image encoding @<:@default=check@:>@])],
+            [],
+            [with_webp=check])
+
+if test "x$with_webp" != "xno"
+then
+    have_webp=yes
+
+    AC_CHECK_HEADER(webp/encode.h,, [have_webp=no])
+    AC_CHECK_LIB([webp], [WebPEncode], [WEBP_LIBS="$WEBP_LIBS -lwebp"], [have_webp=no])
+
+    if test "x${have_webp}" = "xno"
+    then
+        AC_MSG_WARN([
+  --------------------------------------------
+   Unable to find libwebp.
+   Images will not be encoded using WebP.
+  --------------------------------------------])
+    else
+        AC_DEFINE([ENABLE_WEBP],, [Whether WebP support is enabled])
+    fi
+fi
+
+AM_CONDITIONAL([ENABLE_WEBP], [test "x${have_webp}" = "xyes"])
+AC_SUBST(WEBP_LIBS)
+
 
 AC_CONFIG_FILES([Makefile
                  tests/Makefile
                  src/common/Makefile
+                 src/common-ssh/Makefile
                  src/terminal/Makefile
                  src/libguac/Makefile
                  src/guacd/Makefile
@@ -860,6 +1002,7 @@ $PACKAGE_NAME version $PACKAGE_VERSION
      libVNCServer ........ ${have_libvncserver}
      libvorbis ........... ${have_vorbis}
      libpulse ............ ${have_pulse}
+     libwebp ............. ${have_webp}
 
    Protocol support:
 

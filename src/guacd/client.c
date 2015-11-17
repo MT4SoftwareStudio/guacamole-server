@@ -57,6 +57,9 @@ void* __guacd_client_output_thread(void* data) {
     guac_client* client = (guac_client*) data;
     guac_socket* socket = client->socket;
 
+    guac_client_log(client, GUAC_LOG_DEBUG,
+            "Starting output thread.");
+
     /* Guacamole client output loop */
     while (client->state == GUAC_CLIENT_RUNNING) {
 
@@ -69,7 +72,7 @@ void* __guacd_client_output_thread(void* data) {
 
                 int retval = client->handle_messages(client);
                 if (retval) {
-                    guacd_client_log_guac_error(client,
+                    guacd_client_log_guac_error(client, GUAC_LOG_DEBUG,
                             "Error handling server messages");
                     guac_client_stop(client);
                     return NULL;
@@ -78,7 +81,7 @@ void* __guacd_client_output_thread(void* data) {
                 /* Send sync instruction */
                 client->last_sent_timestamp = guac_timestamp_current();
                 if (guac_protocol_send_sync(socket, client->last_sent_timestamp)) {
-                    guacd_client_log_guac_error(client, 
+                    guacd_client_log_guac_error(client, GUAC_LOG_DEBUG,
                             "Error sending \"sync\" instruction");
                     guac_client_stop(client);
                     return NULL;
@@ -86,7 +89,7 @@ void* __guacd_client_output_thread(void* data) {
 
                 /* Flush */
                 if (guac_socket_flush(socket)) {
-                    guacd_client_log_guac_error(client,
+                    guacd_client_log_guac_error(client, GUAC_LOG_DEBUG,
                             "Error flushing output");
                     guac_client_stop(client);
                     return NULL;
@@ -106,6 +109,9 @@ void* __guacd_client_output_thread(void* data) {
 
     } /* End of output loop */
 
+    guac_client_log(client, GUAC_LOG_DEBUG,
+            "Output thread terminated.");
+
     guac_client_stop(client);
     return NULL;
 
@@ -115,6 +121,9 @@ void* __guacd_client_input_thread(void* data) {
 
     guac_client* client = (guac_client*) data;
     guac_socket* socket = client->socket;
+
+    guac_client_log(client, GUAC_LOG_DEBUG,
+            "Starting input thread.");
 
     /* Guacamole client input loop */
     while (client->state == GUAC_CLIENT_RUNNING) {
@@ -126,11 +135,13 @@ void* __guacd_client_input_thread(void* data) {
         /* Stop on error */
         if (instruction == NULL) {
 
-            if (guac_error == GUAC_STATUS_INPUT_TIMEOUT)
+            if (guac_error == GUAC_STATUS_TIMEOUT)
                 guac_client_abort(client, GUAC_PROTOCOL_STATUS_CLIENT_TIMEOUT, "Client is not responding.");
 
             else {
-                guacd_client_log_guac_error(client, "Error reading instruction");
+                if (guac_error != GUAC_STATUS_CLOSED)
+                    guacd_client_log_guac_error(client, GUAC_LOG_WARNING,
+                            "Guacamole connection failure");
                 guac_client_stop(client);
             }
 
@@ -146,11 +157,11 @@ void* __guacd_client_input_thread(void* data) {
         if (guac_client_handle_instruction(client, instruction) < 0) {
 
             /* Log error */
-            guacd_client_log_guac_error(client,
-                    "Client instruction handler error");
+            guacd_client_log_guac_error(client, GUAC_LOG_WARNING,
+                    "Connection aborted");
 
             /* Log handler details */
-            guac_client_log_info(client,
+            guac_client_log(client, GUAC_LOG_DEBUG,
                     "Failing instruction handler in client was \"%s\"",
                     instruction->opcode);
 
@@ -164,6 +175,9 @@ void* __guacd_client_input_thread(void* data) {
 
     }
 
+    guac_client_log(client, GUAC_LOG_DEBUG,
+            "Input thread terminated.");
+
     return NULL;
 
 }
@@ -173,12 +187,12 @@ int guacd_client_start(guac_client* client) {
     pthread_t input_thread, output_thread;
 
     if (pthread_create(&output_thread, NULL, __guacd_client_output_thread, (void*) client)) {
-        guac_client_log_error(client, "Unable to start output thread");
+        guac_client_log(client, GUAC_LOG_ERROR, "Unable to start output thread");
         return -1;
     }
 
     if (pthread_create(&input_thread, NULL, __guacd_client_input_thread, (void*) client)) {
-        guac_client_log_error(client, "Unable to start input thread");
+        guac_client_log(client, GUAC_LOG_ERROR, "Unable to start input thread");
         guac_client_stop(client);
         pthread_join(output_thread, NULL);
         return -1;

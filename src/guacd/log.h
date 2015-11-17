@@ -28,18 +28,50 @@
 
 #include <guacamole/client.h>
 
-extern char log_prefix[64];
+/**
+ * The maximum level at which to log messages. All other messages will be
+ * dropped.
+ */
+extern int guacd_log_level;
 
-void vguacd_log_info(const char* format, va_list args);
-void vguacd_log_error(const char* format, va_list args);
-void guacd_log_info(const char* format, ...);
-void guacd_log_error(const char* format, ...);
+/**
+ * The string to prepend to all log messages.
+ */
+#define GUACD_LOG_NAME "guacd"
 
-void guacd_client_log_info(guac_client* client, const char* format, va_list args);
-void guacd_client_log_error(guac_client* client, const char* format, va_list args);
+/**
+ * Writes a message to guacd's logs. This function takes a format and va_list,
+ * similar to vprintf.
+ */
+void vguacd_log(guac_client_log_level level, const char* format, va_list args);
 
-void guacd_log_guac_error(const char* message);
-void guacd_client_log_guac_error(guac_client* client, const char* message);
+/**
+ * Writes a message to guacd's logs. This function accepts parameters
+ * identically to printf.
+ */
+void guacd_log(guac_client_log_level level, const char* format, ...);
+
+/**
+ * Writes a message using the logging facilities of the given client. This
+ * function accepts parameters identically to printf.
+ */
+void guacd_client_log(guac_client* client, guac_client_log_level level,
+        const char* format, va_list args);
+
+/**
+ * Prints an error message to guacd's logs, automatically including any
+ * information present in guac_error. This function accepts parameters
+ * identically to printf.
+ */
+void guacd_log_guac_error(guac_client_log_level level, const char* message);
+
+/**
+ * Prints an error message using the logging facilities of the given client,
+ * automatically including any information present in guac_error. This function
+ * accepts parameters identically to printf.
+ */
+void guacd_client_log_guac_error(guac_client* client,
+        guac_client_log_level level, const char* message);
 
 #endif
 

@@ -34,6 +34,12 @@
 #include "pulse.h"
 #endif
 
+#ifdef ENABLE_COMMON_SSH
+#include "guac_sftp.h"
+#include "guac_ssh.h"
+#include "sftp.h"
+#endif
+
 #include <rfb/rfbclient.h>
 #include <rfb/rfbproto.h>
 #include <guacamole/client.h>
@@ -55,6 +61,7 @@ const char* GUAC_CLIENT_ARGS[] = {
     "color-depth",
     "cursor",
     "autoretry",
+    "clipboard-encoding",
 
 #ifdef ENABLE_VNC_REPEATER
     "dest-host",
@@ -71,6 +78,17 @@ const char* GUAC_CLIENT_ARGS[] = {
     "listen-timeout",
 #endif
 
+#ifdef ENABLE_COMMON_SSH
+    "enable-sftp",
+    "sftp-hostname",
+    "sftp-port",
+    "sftp-username",
+    "sftp-password",
+    "sftp-private-key",
+    "sftp-passphrase",
+    "sftp-directory",
+#endif
+
     NULL
 };
 
@@ -85,6 +103,7 @@ enum VNC_ARGS_IDX {
     IDX_COLOR_DEPTH,
     IDX_CURSOR,
     IDX_AUTORETRY,
+    IDX_CLIPBOARD_ENCODING,
 
 #ifdef ENABLE_VNC_REPEATER
     IDX_DEST_HOST,
@@ -99,6 +118,17 @@ enum VNC_ARGS_IDX {
 #ifdef ENABLE_VNC_LISTEN
     IDX_REVERSE_CONNECT,
     IDX_LISTEN_TIMEOUT,
+#endif
+
+#ifdef ENABLE_COMMON_SSH
+    IDX_ENABLE_SFTP,
+    IDX_SFTP_HOSTNAME,
+    IDX_SFTP_PORT,
+    IDX_SFTP_USERNAME,
+    IDX_SFTP_PASSWORD,
+    IDX_SFTP_PRIVATE_KEY,
+    IDX_SFTP_PASSPHRASE,
+    IDX_SFTP_DIRECTORY,
 #endif
 
     VNC_ARGS_COUNT
@@ -167,7 +197,7 @@ static rfbClient* __guac_vnc_get_client(guac_client* client) {
     /* If reverse connection enabled, start listening */
     if (guac_client_data->reverse_connect) {
 
-        guac_client_log_info(client, "Listening for connections on port %i",
+        guac_client_log(client, GUAC_LOG_INFO, "Listening for connections on port %i",
                 guac_client_data->port);
 
         /* Listen for connection from server */
@@ -190,6 +220,66 @@ static rfbClient* __guac_vnc_get_client(guac_client* client) {
 
     /* If connection fails, return NULL */
     return NULL;
+
+}
+
+/**
+ * Sets the encoding of clipboard data exchanged with the VNC server to the
+ * encoding having the given name. If the name is left blank, or is invalid,
+ * the standard ISO8859-1 encoding will be used.
+ *
+ * @param client
+ *     The client to set the clipboard encoding of.
+ *
+ * @param name
+ *     The name of the encoding to use for all clipboard data. Valid values
+ *     are: "ISO8859-1", "UTF-8", "UTF-16", "CP1252", or "".
+ *
+ * @return
+ *     Zero if the chosen encoding is standard for VNC, or non-zero if the VNC
+ *     standard is being violated.
+ */
+static int guac_vnc_set_clipboard_encoding(guac_client* client,
+        const char* name) {
+
+    vnc_guac_client_data* guac_client_data =
+        (vnc_guac_client_data*) client->data;
+
+    /* Use ISO8859-1 if explicitly selected or blank */
+    if (name[0] == '\0' || strcmp(name, "ISO8859-1") == 0) {
+        guac_client_data->clipboard_reader = GUAC_READ_ISO8859_1;
+        guac_client_data->clipboard_writer = GUAC_WRITE_ISO8859_1;
+        return 0;
+    }
+
+    /* UTF-8 */
+    if (strcmp(name, "UTF-8") == 0) {
+        guac_client_data->clipboard_reader = GUAC_READ_UTF8;
+        guac_client_data->clipboard_writer = GUAC_WRITE_UTF8;
+        return 1;
+    }
+
+    /* UTF-16 */
+    if (strcmp(name, "UTF-16") == 0) {
+        guac_client_data->clipboard_reader = GUAC_READ_UTF16;
+        guac_client_data->clipboard_writer = GUAC_WRITE_UTF16;
+        return 1;
+    }
+
+    /* CP1252 */
+    if (strcmp(name, "CP1252") == 0) {
+        guac_client_data->clipboard_reader = GUAC_READ_CP1252;
+        guac_client_data->clipboard_writer = GUAC_WRITE_CP1252;
+        return 1;
+    }
+
+    /* If encoding unrecognized, warn and default to ISO8859-1 */
+    guac_client_log(client, GUAC_LOG_WARNING,
+            "Encoding '%s' is invalid. Defaulting to ISO8859-1.", name);
+
+    guac_client_data->clipboard_reader = GUAC_READ_ISO8859_1;
+    guac_client_data->clipboard_writer = GUAC_WRITE_ISO8859_1;
+    return 0;
 
 }
 
@@ -267,6 +357,12 @@ int guac_client_init(guac_client* client, int argc, char** argv) {
     /* Init clipboard */
     guac_client_data->clipboard = guac_common_clipboard_alloc(GUAC_VNC_CLIPBOARD_MAX_LENGTH);
 
+    /* Configure clipboard encoding */
+    if (guac_vnc_set_clipboard_encoding(client, argv[IDX_CLIPBOARD_ENCODING]))
+        guac_client_log(client, GUAC_LOG_INFO,
+                "Using non-standard VNC clipboard encoding: '%s'.",
+                argv[IDX_CLIPBOARD_ENCODING]);
+
     /* Ensure connection is kept alive during lengthy connects */
     guac_socket_require_keep_alive(client->socket);
 
@@ -281,7 +377,7 @@ int guac_client_init(guac_client* client, int argc, char** argv) {
             .tv_nsec = (GUAC_VNC_CONNECT_INTERVAL%1000)*1000000
         };
 
-        guac_client_log_info(client,
+        guac_client_log(client, GUAC_LOG_INFO,
                 "Connect failed. Waiting %ims before retrying...",
                 GUAC_VNC_CONNECT_INTERVAL);
 
@@ -305,7 +401,10 @@ int guac_client_init(guac_client* client, int argc, char** argv) {
     /* If an encoding is available, load an audio stream */
     if (guac_client_data->audio_enabled) {    
 
-        guac_client_data->audio = guac_audio_stream_alloc(client, NULL);
+        guac_client_data->audio = guac_audio_stream_alloc(client, NULL,
+                GUAC_VNC_AUDIO_RATE,
+                GUAC_VNC_AUDIO_CHANNELS,
+                GUAC_VNC_AUDIO_BPS);
 
         /* Load servername if specified */
         if (argv[IDX_AUDIO_SERVERNAME][0] != '\0')
@@ -317,7 +416,7 @@ int guac_client_init(guac_client* client, int argc, char** argv) {
         /* If successful, init audio system */
         if (guac_client_data->audio != NULL) {
             
-            guac_client_log_info(client,
+            guac_client_log(client, GUAC_LOG_INFO,
                     "Audio will be encoded as %s",
                     guac_client_data->audio->encoder->mimetype);
 
@@ -331,10 +430,95 @@ int guac_client_init(guac_client* client, int argc, char** argv) {
 
         /* Otherwise, audio loading failed */
         else
-            guac_client_log_info(client,
+            guac_client_log(client, GUAC_LOG_INFO,
                     "No available audio encoding. Sound disabled.");
 
     } /* end if audio enabled */
+#endif
+
+#ifdef ENABLE_COMMON_SSH
+    guac_common_ssh_init(client);
+
+    /* Connect via SSH if SFTP is enabled */
+    if (strcmp(argv[IDX_ENABLE_SFTP], "true") == 0) {
+
+        guac_client_log(client, GUAC_LOG_DEBUG,
+                "Connecting via SSH for SFTP filesystem access.");
+
+        guac_client_data->sftp_user =
+            guac_common_ssh_create_user(argv[IDX_SFTP_USERNAME]);
+
+        /* Import private key, if given */
+        if (argv[IDX_SFTP_PRIVATE_KEY][0] != '\0') {
+
+            guac_client_log(client, GUAC_LOG_DEBUG,
+                    "Authenticating with private key.");
+
+            /* Abort if private key cannot be read */
+            if (guac_common_ssh_user_import_key(guac_client_data->sftp_user,
+                        argv[IDX_SFTP_PRIVATE_KEY],
+                        argv[IDX_SFTP_PASSPHRASE])) {
+                guac_common_ssh_destroy_user(guac_client_data->sftp_user);
+                return 1;
+            }
+
+        }
+
+        /* Otherwise, use specified password */
+        else {
+            guac_client_log(client, GUAC_LOG_DEBUG,
+                    "Authenticating with password.");
+            guac_common_ssh_user_set_password(guac_client_data->sftp_user,
+                    argv[IDX_SFTP_PASSWORD]);
+        }
+
+        /* Parse hostname - use VNC hostname by default */
+        const char* sftp_hostname = argv[IDX_SFTP_HOSTNAME];
+        if (sftp_hostname[0] == '\0')
+            sftp_hostname = guac_client_data->hostname;
+
+        /* Parse port, defaulting to standard SSH port */
+        const char* sftp_port = argv[IDX_SFTP_PORT];
+        if (sftp_port[0] == '\0')
+            sftp_port = "22";
+
+        /* Attempt SSH connection */
+        guac_client_data->sftp_session =
+            guac_common_ssh_create_session(client, sftp_hostname, sftp_port,
+                    guac_client_data->sftp_user);
+
+        /* Fail if SSH connection does not succeed */
+        if (guac_client_data->sftp_session == NULL) {
+            /* Already aborted within guac_common_ssh_create_session() */
+            guac_common_ssh_destroy_user(guac_client_data->sftp_user);
+            return 1;
+        }
+
+        /* Load and expose filesystem */
+        guac_client_data->sftp_filesystem =
+            guac_common_ssh_create_sftp_filesystem(
+                    guac_client_data->sftp_session, "/");
+
+        /* Abort if SFTP connection fails */
+        if (guac_client_data->sftp_filesystem == NULL) {
+            guac_common_ssh_destroy_session(guac_client_data->sftp_session);
+            guac_common_ssh_destroy_user(guac_client_data->sftp_user);
+            return 1;
+        }
+
+        /* Configure destination for basic uploads, if specified */
+        if (argv[IDX_SFTP_DIRECTORY][0] != '\0')
+            guac_common_ssh_sftp_set_upload_path(
+                    guac_client_data->sftp_filesystem,
+                    argv[IDX_SFTP_DIRECTORY]);
+
+        /* Set file handler for basic uploads */
+        client->file_handler = guac_vnc_sftp_file_handler;
+
+        guac_client_log(client, GUAC_LOG_DEBUG,
+                "SFTP connection succeeded.");
+
+    }
 #endif
 
     /* Set remaining client data */
@@ -368,8 +552,9 @@ int guac_client_init(guac_client* client, int argc, char** argv) {
     guac_protocol_send_name(client->socket, rfb_client->desktopName);
 
     /* Create default surface */
-    guac_client_data->default_surface = guac_common_surface_alloc(client->socket, GUAC_DEFAULT_LAYER,
-                                                                  rfb_client->width, rfb_client->height);
+    guac_client_data->default_surface = guac_common_surface_alloc(client,
+            client->socket, GUAC_DEFAULT_LAYER,
+            rfb_client->width, rfb_client->height);
     return 0;
 
 }

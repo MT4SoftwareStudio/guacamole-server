@@ -34,11 +34,13 @@
 #include "client-constants.h"
 #include "instruction-types.h"
 #include "layer-types.h"
+#include "object-types.h"
 #include "pool-types.h"
 #include "socket-types.h"
 #include "stream-types.h"
 #include "timestamp-types.h"
 
+#include <cairo/cairo.h>
 #include <stdarg.h>
 
 struct guac_client_info {
@@ -63,13 +65,20 @@ struct guac_client_info {
      * NULL-terminated array of client-supported audio mimetypes. If the client
      * does not support audio at all, this will be NULL.
      */
-    const char** audio_mimetypes;
+    char** audio_mimetypes;
 
     /**
      * NULL-terminated array of client-supported video mimetypes. If the client
      * does not support video at all, this will be NULL.
      */
-    const char** video_mimetypes;
+    char** video_mimetypes;
+
+    /**
+     * NULL-terminated array of client-supported image mimetypes. Though all
+     * supported image mimetypes will be listed here, it can be safely assumed
+     * that all clients will support at least "image/png" and "image/jpeg".
+     */ 
+    char** image_mimetypes;
 
     /**
      * The DPI of the physical remote display if configured for the optimal
@@ -343,8 +352,8 @@ struct guac_client {
     guac_client_free_handler* free_handler;
 
     /**
-     * Handler for logging informational messages. This handler will be called
-     * via guac_client_log_info() when the client needs to log information.
+     * Logging handler. This handler will be called via guac_client_log() when
+     * the client needs to log messages of any type.
      *
      * In general, only programs loading the client should implement this
      * handler, as those are the programs that would provide the logging
@@ -355,7 +364,7 @@ struct guac_client {
      *
      * Example:
      * @code
-     *     void log_handler(guac_client* client, const char* format, va_list args);
+     *     void log_handler(guac_client* client, guac_client_log_level level, const char* format, va_list args);
      *
      *     void function_of_daemon() {
      *
@@ -364,31 +373,47 @@ struct guac_client {
      *     }
      * @endcode
      */
-    guac_client_log_handler* log_info_handler;
+    guac_client_log_handler* log_handler;
 
     /**
-     * Handler for logging error messages. This handler will be called
-     * via guac_client_log_error() when the client needs to log an error.
+     * Handler for get events sent by the Guacamole web-client.
      *
-     * In general, only programs loading the client should implement this
-     * handler, as those are the programs that would provide the logging
-     * facilities.
-     *
-     * Client implementations should expect these handlers to already be
-     * set.
+     * The handler takes a guac_object, containing the object index which will
+     * persist through the duration of the transfer, and the name of the stream
+     * being requested. It is up to the get handler to create the required body
+     * stream.
      *
      * Example:
      * @code
-     *     void log_handler(guac_client* client, const char* format, va_list args);
+     *     int get_handler(guac_client* client, guac_object* object,
+     *             char* name);
      *
-     *     void function_of_daemon() {
-     *
-     *         guac_client* client = [pass log_handler to guac_client_plugin_get_client()];
-     *
+     *     int guac_client_init(guac_client* client, int argc, char** argv) {
+     *         client->get_handler = get_handler;
      *     }
      * @endcode
      */
-    guac_client_log_handler* log_error_handler;
+    guac_client_get_handler* get_handler;
+
+    /**
+     * Handler for put events sent by the Guacamole web-client.
+     *
+     * The handler takes a guac_object and guac_stream, which each contain their
+     * respective indices which will persist through the duration of the
+     * transfer, the mimetype of the data being transferred, and the name of
+     * the stream within the object being written to.
+     *
+     * Example:
+     * @code
+     *     int put_handler(guac_client* client, guac_object* object,
+     *             guac_stream* stream, char* mimetype, char* name);
+     *
+     *     int guac_client_init(guac_client* client, int argc, char** argv) {
+     *         client->put_handler = put_handler;
+     *     }
+     * @endcode
+     */
+    guac_client_put_handler* put_handler;
 
     /**
      * Pool of buffer indices. Buffers are simply layers with negative indices.
@@ -418,6 +443,16 @@ struct guac_client {
      * All available input streams (data coming from connected client).
      */
     guac_stream* __input_streams;
+
+    /**
+     * Pool of object indices.
+     */
+    guac_pool* __object_pool;
+
+    /**
+     * All available objects (arbitrary sets of named streams).
+     */
+    guac_object* __objects;
 
     /**
      * The unique identifier allocated for the connection, which may
@@ -458,54 +493,31 @@ void guac_client_free(guac_client* client);
 int guac_client_handle_instruction(guac_client* client, guac_instruction* instruction);
 
 /**
- * Logs an informational message in the log used by the given client. The
- * logger used will normally be defined by guacd (or whichever program loads
- * the proxy client) by setting the logging handlers of the client when it is
- * loaded.
+ * Writes a message in the log used by the given client. The logger used will
+ * normally be defined by guacd (or whichever program loads the proxy client)
+ * by setting the logging handlers of the client when it is loaded.
  *
- * @param client The proxy client to log an informational message for.
+ * @param client The proxy client logging this message.
+ * @param level The level at which to log this message.
  * @param format A printf-style format string to log.
  * @param ... Arguments to use when filling the format string for printing.
  */
-void guac_client_log_info(guac_client* client, const char* format, ...);
+void guac_client_log(guac_client* client, guac_client_log_level level,
+        const char* format, ...);
 
 /**
- * Logs an error message in the log used by the given client. The logger
- * used will normally be defined by guacd (or whichever program loads the
- * proxy client) by setting the logging handlers of the client when it is
- * loaded.
+ * Writes a message in the log used by the given client. The logger used will
+ * normally be defined by guacd (or whichever program loads the proxy client)
+ * by setting the logging handlers of the client when it is loaded.
  *
- * @param client The proxy client to log an error for.
- * @param format A printf-style format string to log.
- * @param ... Arguments to use when filling the format string for printing.
- */
-void guac_client_log_error(guac_client* client, const char* format, ...);
-
-/**
- * Logs an informational message in the log used by the given client. The
- * logger used will normally be defined by guacd (or whichever program loads
- * the proxy client) by setting the logging handlers of the client when it is
- * loaded.
- *
- * @param client The proxy client to log an informational message for.
+ * @param client The proxy client logging this message.
+ * @param level The level at which to log this message.
  * @param format A printf-style format string to log.
  * @param ap The va_list containing the arguments to be used when filling the
  *           format string for printing.
  */
-void vguac_client_log_info(guac_client* client, const char* format, va_list ap);
-
-/**
- * Logs an error message in the log used by the given client. The logger
- * used will normally be defined by guacd (or whichever program loads the
- * proxy client) by setting the logging handlers of the client when it is
- * loaded.
- *
- * @param client The proxy client to log an error for.
- * @param format A printf-style format string to log.
- * @param ap The va_list containing the arguments to be used when filling the
- *           format string for printing.
- */
-void vguac_client_log_error(guac_client* client, const char* format, va_list ap);
+void vguac_client_log(guac_client* client, guac_client_log_level level,
+        const char* format, va_list ap);
 
 /**
  * Signals the given client to stop gracefully. This is a completely
@@ -598,6 +610,158 @@ guac_stream* guac_client_alloc_stream(guac_client* client);
  * @param stream The stream to return to the pool of available stream.
  */
 void guac_client_free_stream(guac_client* client, guac_stream* stream);
+
+/**
+ * Allocates a new object. An arbitrary index is automatically assigned
+ * if no previously-allocated object is available for use.
+ *
+ * @param client
+ *     The proxy client to allocate the object for.
+ *
+ * @return
+ *     The next available object, or a newly allocated object.
+ */
+guac_object* guac_client_alloc_object(guac_client* client);
+
+/**
+ * Returns the given object to the pool of available objects, such that it
+ * can be reused by any subsequent call to guac_client_alloc_object().
+ *
+ * @param client
+ *     The proxy client to return the object to.
+ *
+ * @param object
+ *     The object to return to the pool of available object.
+ */
+void guac_client_free_object(guac_client* client, guac_object* object);
+
+/**
+ * Streams the image data of the given surface over an image stream ("img"
+ * instruction) as PNG-encoded data. The image stream will be automatically
+ * allocated and freed.
+ *
+ * @param client
+ *     The Guacamole client from which the image stream should be allocated.
+ *
+ * @param socket
+ *     The socket over which instructions associated with the image stream
+ *     should be sent.
+ *
+ * @param mode
+ *     The composite mode to use when rendering the image over the given layer.
+ *
+ * @param layer
+ *     The destination layer.
+ *
+ * @param x
+ *     The X coordinate of the upper-left corner of the destination rectangle
+ *     within the given layer.
+ *
+ * @param y
+ *     The Y coordinate of the upper-left corner of the destination rectangle
+ *     within the given layer.
+ *
+ * @param surface
+ *     A Cairo surface containing the image data to be streamed.
+ */
+void guac_client_stream_png(guac_client* client, guac_socket* socket,
+        guac_composite_mode mode, const guac_layer* layer, int x, int y,
+        cairo_surface_t* surface);
+
+/**
+ * Streams the image data of the given surface over an image stream ("img"
+ * instruction) as JPEG-encoded data at the given quality. The image stream
+ * will be automatically allocated and freed.
+ *
+ * @param client
+ *     The Guacamole client from which the image stream should be allocated.
+ *
+ * @param socket
+ *     The socket over which instructions associated with the image stream
+ *     should be sent.
+ *
+ * @param mode
+ *     The composite mode to use when rendering the image over the given layer.
+ *
+ * @param layer
+ *     The destination layer.
+ *
+ * @param x
+ *     The X coordinate of the upper-left corner of the destination rectangle
+ *     within the given layer.
+ *
+ * @param y
+ *     The Y coordinate of the upper-left corner of the destination rectangle
+ *     within the given layer.
+ *
+ * @param surface
+ *     A Cairo surface containing the image data to be streamed.
+ *
+ * @param quality
+ *     The JPEG image quality, which must be an integer value between 0 and
+ *     100 inclusive.
+ */
+void guac_client_stream_jpeg(guac_client* client, guac_socket* socket,
+        guac_composite_mode mode, const guac_layer* layer, int x, int y,
+        cairo_surface_t* surface, int quality);
+
+/**
+ * Streams the image data of the given surface over an image stream ("img"
+ * instruction) as WebP-encoded data at the given quality. The image stream
+ * will be automatically allocated and freed. If the server does not support
+ * WebP, this function has no effect, so be sure to check the result of
+ * guac_client_supports_webp() prior to calling this function.
+ *
+ * @param client
+ *     The Guacamole client from which the image stream should be allocated.
+ *
+ * @param socket
+ *     The socket over which instructions associated with the image stream
+ *     should be sent.
+ *
+ * @param mode
+ *     The composite mode to use when rendering the image over the given layer.
+ *
+ * @param layer
+ *     The destination layer.
+ *
+ * @param x
+ *     The X coordinate of the upper-left corner of the destination rectangle
+ *     within the given layer.
+ *
+ * @param y
+ *     The Y coordinate of the upper-left corner of the destination rectangle
+ *     within the given layer.
+ *
+ * @param surface
+ *     A Cairo surface containing the image data to be streamed.
+ *
+ * @param quality
+ *     The WebP image quality, which must be an integer value between 0 and 100
+ *     inclusive. For lossy images, larger values indicate improving quality at
+ *     the expense of larger file size. For lossless images, this dictates the
+ *     quality of compression, with larger values producing smaller files at
+ *     the expense of speed.
+ *
+ * @param lossless
+ *     Zero to encode a lossy image, non-zero to encode losslessly.
+ */
+void guac_client_stream_webp(guac_client* client, guac_socket* socket,
+        guac_composite_mode mode, const guac_layer* layer, int x, int y,
+        cairo_surface_t* surface, int quality, int lossless);
+
+/**
+ * Returns whether the given client supports WebP. If the client does not
+ * support WebP, or the server cannot encode WebP images, zero is returned.
+ *
+ * @param client
+ *     The Guacamole client to check for WebP support.
+ *
+ * @return
+ *     Non-zero if the given client claims to support WebP and the server has
+ *     been built with WebP support, zero otherwise.
+ */
+int guac_client_supports_webp(guac_client* client);
 
 /**
  * The default Guacamole client layer, layer 0.

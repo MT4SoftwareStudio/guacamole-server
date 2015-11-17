@@ -33,6 +33,12 @@
 #include "rdp_rail.h"
 #include "rdp_stream.h"
 
+#ifdef ENABLE_COMMON_SSH
+#include <guac_sftp.h>
+#include <guac_ssh.h>
+#include <guac_ssh_user.h>
+#endif
+
 #include <freerdp/cache/cache.h>
 #include <freerdp/channels/channels.h>
 #include <freerdp/codec/color.h>
@@ -43,6 +49,10 @@
 #include <guacamole/error.h>
 #include <guacamole/protocol.h>
 #include <guacamole/timestamp.h>
+
+#ifdef HAVE_FREERDP_DISPLAY_UPDATE_SUPPORT
+#include "rdp_disp.h"
+#endif
 
 #ifdef HAVE_FREERDP_CLIENT_CLIPRDR_H
 #include <freerdp/client/cliprdr.h>
@@ -84,6 +94,27 @@ int rdp_guac_client_free_handler(guac_client* client) {
     /* Clean up filesystem, if allocated */
     if (guac_client_data->filesystem != NULL)
         guac_rdp_fs_free(guac_client_data->filesystem);
+
+#ifdef ENABLE_COMMON_SSH
+    /* Free SFTP filesystem, if loaded */
+    if (guac_client_data->sftp_filesystem)
+        guac_common_ssh_destroy_sftp_filesystem(guac_client_data->sftp_filesystem);
+
+    /* Free SFTP session */
+    if (guac_client_data->sftp_session)
+        guac_common_ssh_destroy_session(guac_client_data->sftp_session);
+
+    /* Free SFTP user */
+    if (guac_client_data->sftp_user)
+        guac_common_ssh_destroy_user(guac_client_data->sftp_user);
+
+    guac_common_ssh_uninit();
+#endif
+
+#ifdef HAVE_FREERDP_DISPLAY_UPDATE_SUPPORT
+    /* Free display update module */
+    guac_rdp_disp_free(guac_client_data->disp);
+#endif
 
     /* Free SVC list */
     guac_common_list_free(guac_client_data->available_svc);
@@ -184,6 +215,13 @@ int rdp_guac_client_handle_messages(guac_client* client) {
     rdpChannels* channels = rdp_inst->context->channels;
     wMessage* event;
 
+#ifdef HAVE_FREERDP_DISPLAY_UPDATE_SUPPORT
+    /* Update remote display size */
+    pthread_mutex_lock(&(guac_client_data->rdp_lock));
+    guac_rdp_disp_update_size(guac_client_data->disp, rdp_inst->context);
+    pthread_mutex_unlock(&(guac_client_data->rdp_lock));
+#endif
+
     /* Wait for messages */
     int wait_result = rdp_guac_client_wait_for_messages(client, 250000);
     guac_timestamp frame_start = guac_timestamp_current();
@@ -196,16 +234,14 @@ int rdp_guac_client_handle_messages(guac_client* client) {
 
         /* Check the libfreerdp fds */
         if (!freerdp_check_fds(rdp_inst)) {
-            guac_error = GUAC_STATUS_BAD_STATE;
-            guac_error_message = "Error handling RDP file descriptors";
+            guac_client_log(client, GUAC_LOG_DEBUG, "Error handling RDP file descriptors");
             pthread_mutex_unlock(&(guac_client_data->rdp_lock));
             return 1;
         }
 
         /* Check channel fds */
         if (!freerdp_channels_check_fds(channels, rdp_inst)) {
-            guac_error = GUAC_STATUS_BAD_STATE;
-            guac_error_message = "Error handling RDP channel file descriptors";
+            guac_client_log(client, GUAC_LOG_DEBUG, "Error handling RDP channel file descriptors");
             pthread_mutex_unlock(&(guac_client_data->rdp_lock));
             return 1;
         }
@@ -233,8 +269,7 @@ int rdp_guac_client_handle_messages(guac_client* client) {
 
         /* Handle RDP disconnect */
         if (freerdp_shall_disconnect(rdp_inst)) {
-            guac_error = GUAC_STATUS_NO_INPUT;
-            guac_error_message = "RDP server closed connection";
+            guac_client_log(client, GUAC_LOG_INFO, "RDP server closed connection");
             pthread_mutex_unlock(&(guac_client_data->rdp_lock));
             return 1;
         }
@@ -398,6 +433,9 @@ int __guac_rdp_send_keysym(guac_client* client, int keysym, int pressed) {
      * DOWN/RELEASE flags */
     if (pressed) {
 
+        guac_client_log(client, GUAC_LOG_DEBUG,
+                "Sending keysym 0x%x as Unicode", keysym);
+
         /* Translate keysym into codepoint */
         int codepoint;
         if (keysym <= 0xFF)
@@ -405,7 +443,7 @@ int __guac_rdp_send_keysym(guac_client* client, int keysym, int pressed) {
         else if (keysym >= 0x1000000)
             codepoint = keysym & 0xFFFFFF;
         else {
-            guac_client_log_info(client,
+            guac_client_log(client, GUAC_LOG_DEBUG,
                     "Unmapped keysym has no equivalent unicode "
                     "value: 0x%x", keysym);
             return 0;
@@ -456,6 +494,32 @@ int rdp_guac_client_key_handler(guac_client* client, int keysym, int pressed) {
         GUAC_RDP_KEYSYM_LOOKUP(guac_client_data->keysym_state, keysym) = pressed;
 
     return __guac_rdp_send_keysym(client, keysym, pressed);
+
+}
+
+int rdp_guac_client_size_handler(guac_client* client, int width, int height) {
+
+#ifdef HAVE_FREERDP_DISPLAY_UPDATE_SUPPORT
+    rdp_guac_client_data* guac_client_data =
+        (rdp_guac_client_data*) client->data;
+
+    freerdp* rdp_inst = guac_client_data->rdp_inst;
+
+    /* Convert client pixels to remote pixels */
+    width  = width  * guac_client_data->settings.resolution
+                    / client->info.optimal_resolution;
+
+    height = height * guac_client_data->settings.resolution
+                    / client->info.optimal_resolution;
+
+    /* Send display update */
+    pthread_mutex_lock(&(guac_client_data->rdp_lock));
+    guac_rdp_disp_set_size(guac_client_data->disp, rdp_inst->context,
+            width, height);
+    pthread_mutex_unlock(&(guac_client_data->rdp_lock));
+#endif
+
+    return 0;
 
 }
 

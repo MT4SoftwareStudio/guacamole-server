@@ -25,6 +25,7 @@
 #include "client.h"
 #include "guac_surface.h"
 #include "rdp_bitmap.h"
+#include "rdp_color.h"
 #include "rdp_settings.h"
 
 #include <cairo/cairo.h>
@@ -90,7 +91,7 @@ guac_transfer_function guac_rdp_rop3_transfer_function(guac_client* client,
     }
 
     /* Log warning if ROP3 opcode not supported */
-    guac_client_log_info (client, "guac_rdp_rop3_transfer_function: "
+    guac_client_log(client, GUAC_LOG_INFO, "guac_rdp_rop3_transfer_function: "
             "UNSUPPORTED opcode = 0x%02X", rop3);
 
     /* Default to BINARY_SRC */
@@ -134,7 +135,7 @@ void guac_rdp_gdi_dstblt(rdpContext* context, DSTBLT_ORDER* dstblt) {
 
         /* Unsupported ROP3 */
         default:
-            guac_client_log_info(client,
+            guac_client_log(client, GUAC_LOG_INFO,
                     "guac_rdp_gdi_dstblt(rop3=0x%x)", dstblt->bRop);
 
     }
@@ -168,7 +169,7 @@ void guac_rdp_gdi_patblt(rdpContext* context, PATBLT_ORDER* patblt) {
      * Warn that rendering is a fallback, as the server should not be sending
      * this order.
      */
-    guac_client_log_info(client, "Using fallback PATBLT (server is ignoring "
+    guac_client_log(client, GUAC_LOG_INFO, "Using fallback PATBLT (server is ignoring "
             "negotiated client capabilities)");
 
     /* Render rectangle based on ROP */
@@ -243,7 +244,7 @@ void guac_rdp_gdi_memblt(rdpContext* context, MEMBLT_ORDER* memblt) {
 
     /* Make sure that the recieved bitmap is not NULL before processing */
     if (bitmap == NULL) {
-        guac_client_log_info(client, "NULL bitmap found in memblt instruction.");
+        guac_client_log(client, GUAC_LOG_INFO, "NULL bitmap found in memblt instruction.");
         return;
     }
 
@@ -320,11 +321,8 @@ void guac_rdp_gdi_opaquerect(rdpContext* context, OPAQUE_RECT_ORDER* opaque_rect
 
     /* Get client data */
     guac_client* client = ((rdp_freerdp_context*) context)->client;
-    rdp_guac_client_data* client_data = (rdp_guac_client_data*) client->data;
 
-    UINT32 color = freerdp_color_convert_var(opaque_rect->color,
-            client_data->settings.color_depth, 32,
-            ((rdp_freerdp_context*) context)->clrconv);
+    UINT32 color = guac_rdp_convert_color(context, opaque_rect->color);
 
     guac_common_surface* current_surface = ((rdp_guac_client_data*) client->data)->current_surface;
 
@@ -340,15 +338,55 @@ void guac_rdp_gdi_opaquerect(rdpContext* context, OPAQUE_RECT_ORDER* opaque_rect
 
 }
 
-void guac_rdp_gdi_palette_update(rdpContext* context, PALETTE_UPDATE* palette) {
+/**
+ * Updates the palette within a FreeRDP CLRCONV object using the new palette
+ * entries provided by an RDP palette update.
+ */
+static void guac_rdp_update_clrconv(CLRCONV* clrconv,
+        PALETTE_UPDATE* palette) {
 
-    CLRCONV* clrconv = ((rdp_freerdp_context*) context)->clrconv;
     clrconv->palette->count = palette->number;
 #ifdef LEGACY_RDPPALETTE
     clrconv->palette->entries = palette->entries;
 #else
-    memcpy(clrconv->palette->entries, palette->entries, sizeof(palette->entries));
+    memcpy(clrconv->palette->entries, palette->entries,
+            sizeof(palette->entries));
 #endif
+
+}
+
+/**
+ * Updates a raw ARGB32 palette using the new palette entries provided by an
+ * RDP palette update.
+ */
+static void guac_rdp_update_palette(UINT32* guac_palette,
+        PALETTE_UPDATE* palette) {
+
+    PALETTE_ENTRY* entry = palette->entries;
+    int i;
+
+    /* Copy each palette entry as ARGB32 */
+    for (i=0; i < palette->number; i++) {
+
+        *guac_palette = 0xFF000000
+                      | (entry->red   << 16)
+                      | (entry->green << 8)
+                      |  entry->blue;
+
+        guac_palette++;
+        entry++;
+    }
+
+}
+
+void guac_rdp_gdi_palette_update(rdpContext* context, PALETTE_UPDATE* palette) {
+
+    CLRCONV* clrconv = ((rdp_freerdp_context*) context)->clrconv;
+    UINT32* guac_palette = ((rdp_freerdp_context*) context)->palette;
+
+    /* Update internal palette representations */
+    guac_rdp_update_clrconv(clrconv, palette);
+    guac_rdp_update_palette(guac_palette, palette);
 
 }
 
@@ -382,6 +420,10 @@ void guac_rdp_gdi_desktop_resize(rdpContext* context) {
             guac_rdp_get_height(context->instance));
 
     guac_common_surface_reset_clip(data->default_surface);
+
+    guac_client_log(client, GUAC_LOG_DEBUG, "Server resized display to %ix%i",
+            guac_rdp_get_width(context->instance),
+            guac_rdp_get_height(context->instance));
 
 }
 

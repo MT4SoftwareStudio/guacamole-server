@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2013 Glyptodon LLC
+ * Copyright (C) 2015 Glyptodon LLC
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -20,36 +20,36 @@
  * THE SOFTWARE.
  */
 
-
-#ifndef __GUAC_OGG_ENCODER_H
-#define __GUAC_OGG_ENCODER_H
+#ifndef GUAC_VNC_SFTP_H
+#define GUAC_VNC_SFTP_H
 
 #include "config.h"
 
-#include "audio.h"
+#include <guacamole/client.h>
+#include <guacamole/stream.h>
 
-#include <vorbis/vorbisenc.h>
-
-typedef struct ogg_encoder_state {
-
-    /**
-     * Ogg state
-     */
-    ogg_stream_state ogg_state;
-    ogg_page ogg_page;
-    ogg_packet ogg_packet;
-
-    /**
-     * Vorbis state
-     */
-    vorbis_info info;
-    vorbis_comment comment;
-    vorbis_dsp_state vorbis_state;
-    vorbis_block vorbis_block;
-
-} ogg_encoder_state;
-
-extern guac_audio_encoder* ogg_encoder;
+/**
+ * Handles an incoming stream from a Guacamole "file" instruction, saving the
+ * contents of that stream to the file having the given name.
+ *
+ * @param client
+ *     The client receiving the uploaded file.
+ *
+ * @param stream
+ *     The stream through which the uploaded file data will be received.
+ *
+ * @param mimetype
+ *     The mimetype of the data being received.
+ *
+ * @param filename
+ *     The filename of the file to write to.
+ *
+ * @return
+ *     Zero if the incoming stream has been handled successfully, non-zero on
+ *     failure.
+ */
+int guac_vnc_sftp_file_handler(guac_client* client, guac_stream* stream,
+        char* mimetype, char* filename);
 
 #endif
 

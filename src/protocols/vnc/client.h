@@ -27,6 +27,7 @@
 #include "config.h"
 #include "guac_clipboard.h"
 #include "guac_surface.h"
+#include "guac_iconv.h"
 
 #include <guacamole/audio.h>
 #include <guacamole/layer.h>
@@ -34,6 +35,12 @@
 
 #ifdef ENABLE_PULSE
 #include <pulse/pulseaudio.h>
+#endif
+
+#ifdef ENABLE_COMMON_SSH
+#include "guac_sftp.h"
+#include "guac_ssh.h"
+#include "guac_ssh_user.h"
 #endif
 
 /**
@@ -46,7 +53,7 @@
  * milliseconds. If the server is silent for at least this amount of time, the
  * frame will be considered finished.
  */
-#define GUAC_VNC_FRAME_TIMEOUT 0
+#define GUAC_VNC_FRAME_TIMEOUT 10
 
 /**
  * The number of milliseconds to wait between connection attempts.
@@ -185,6 +192,33 @@ typedef struct vnc_guac_client_data {
      * Default surface.
      */
     guac_common_surface* default_surface;
+
+#ifdef ENABLE_COMMON_SSH
+    /**
+     * The user and credentials used to authenticate for SFTP.
+     */
+    guac_common_ssh_user* sftp_user;
+
+    /**
+     * The SSH session used for SFTP.
+     */
+    guac_common_ssh_session* sftp_session;
+
+    /**
+     * The exposed filesystem object, implemented with SFTP.
+     */
+    guac_object* sftp_filesystem;
+#endif
+
+    /**
+     * Clipboard encoding-specific reader.
+     */
+    guac_iconv_read* clipboard_reader;
+
+    /**
+     * Clipboard encoding-specific writer.
+     */
+    guac_iconv_write* clipboard_writer;
 
 } vnc_guac_client_data;
 

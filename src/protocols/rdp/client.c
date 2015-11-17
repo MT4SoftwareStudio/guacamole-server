@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2013 Glyptodon LLC
+ * Copyright (C) 2015 Glyptodon LLC
  *
  * Permission is hereby granted, free of charge, to any person obtaining a copy
  * of this software and associated documentation files (the "Software"), to deal
@@ -33,6 +33,17 @@
 #include "rdp_pointer.h"
 #include "rdp_stream.h"
 #include "rdp_svc.h"
+#include "resolution.h"
+
+#ifdef ENABLE_COMMON_SSH
+#include "guac_sftp.h"
+#include "guac_ssh.h"
+#include "sftp.h"
+#endif
+
+#ifdef HAVE_FREERDP_DISPLAY_UPDATE_SUPPORT
+#include "rdp_disp.h"
+#endif
 
 #include <freerdp/cache/bitmap.h>
 #include <freerdp/cache/brush.h>
@@ -51,6 +62,14 @@
 #include <freerdp/client/cliprdr.h>
 #else
 #include "compat/client-cliprdr.h"
+#endif
+
+#ifdef HAVE_FREERDP_CLIENT_DISP_H
+#include <freerdp/client/disp.h>
+#endif
+
+#ifdef HAVE_FREERDP_EVENT_PUBSUB
+#include <freerdp/event.h>
 #endif
 
 #ifdef ENABLE_WINPR
@@ -85,12 +104,14 @@ const char* GUAC_CLIENT_ARGS[] = {
     "password",
     "width",
     "height",
+    "dpi",
     "initial-program",
     "color-depth",
     "disable-audio",
     "enable-printing",
     "enable-drive",
     "drive-path",
+    "create-drive-path",
     "console",
     "console-audio",
     "server-layout",
@@ -101,6 +122,27 @@ const char* GUAC_CLIENT_ARGS[] = {
     "remote-app-dir",
     "remote-app-args",
     "static-channels",
+    "client-name",
+    "enable-wallpaper",
+    "enable-theming",
+    "enable-font-smoothing",
+    "enable-full-window-drag",
+    "enable-desktop-composition",
+    "enable-menu-animations",
+    "preconnection-id",
+    "preconnection-blob",
+
+#ifdef ENABLE_COMMON_SSH
+    "enable-sftp",
+    "sftp-hostname",
+    "sftp-port",
+    "sftp-username",
+    "sftp-password",
+    "sftp-private-key",
+    "sftp-passphrase",
+    "sftp-directory",
+#endif
+
     NULL
 };
 
@@ -113,12 +155,14 @@ enum RDP_ARGS_IDX {
     IDX_PASSWORD,
     IDX_WIDTH,
     IDX_HEIGHT,
+    IDX_DPI,
     IDX_INITIAL_PROGRAM,
     IDX_COLOR_DEPTH,
     IDX_DISABLE_AUDIO,
     IDX_ENABLE_PRINTING,
     IDX_ENABLE_DRIVE,
     IDX_DRIVE_PATH,
+    IDX_CREATE_DRIVE_PATH,
     IDX_CONSOLE,
     IDX_CONSOLE_AUDIO,
     IDX_SERVER_LAYOUT,
@@ -129,6 +173,27 @@ enum RDP_ARGS_IDX {
     IDX_REMOTE_APP_DIR,
     IDX_REMOTE_APP_ARGS,
     IDX_STATIC_CHANNELS,
+    IDX_CLIENT_NAME,
+    IDX_ENABLE_WALLPAPER,
+    IDX_ENABLE_THEMING,
+    IDX_ENABLE_FONT_SMOOTHING,
+    IDX_ENABLE_FULL_WINDOW_DRAG,
+    IDX_ENABLE_DESKTOP_COMPOSITION,
+    IDX_ENABLE_MENU_ANIMATIONS,
+    IDX_PRECONNECTION_ID,
+    IDX_PRECONNECTION_BLOB,
+
+#ifdef ENABLE_COMMON_SSH
+    IDX_ENABLE_SFTP,
+    IDX_SFTP_HOSTNAME,
+    IDX_SFTP_PORT,
+    IDX_SFTP_USERNAME,
+    IDX_SFTP_PASSWORD,
+    IDX_SFTP_PRIVATE_KEY,
+    IDX_SFTP_PASSPHRASE,
+    IDX_SFTP_DIRECTORY,
+#endif
+
     RDP_ARGS_COUNT
 };
 
@@ -139,6 +204,45 @@ int __guac_receive_channel_data(freerdp* rdp_inst, int channelId, UINT8* data, i
 #endif
     return freerdp_channels_data(rdp_inst, channelId, data, size, flags, total_size);
 }
+
+#ifdef HAVE_FREERDP_EVENT_PUBSUB
+/**
+ * Called whenever a channel connects via the PubSub event system within
+ * FreeRDP.
+ *
+ * @param context The rdpContext associated with the active RDP session.
+ * @param e Event-specific arguments, mainly the name of the channel, and a
+ *          reference to the associated plugin loaded for that channel by
+ *          FreeRDP.
+ */
+static void guac_rdp_channel_connected(rdpContext* context,
+        ChannelConnectedEventArgs* e) {
+
+#ifdef HAVE_RDPSETTINGS_SUPPORTDISPLAYCONTROL
+    /* Store reference to the display update plugin once it's connected */
+    if (strcmp(e->name, DISP_DVC_CHANNEL_NAME) == 0) {
+
+        DispClientContext* disp = (DispClientContext*) e->pInterface;
+
+        guac_client* client = ((rdp_freerdp_context*) context)->client;
+        rdp_guac_client_data* guac_client_data =
+            (rdp_guac_client_data*) client->data;
+
+        /* Init module with current display size */
+        guac_rdp_disp_set_size(guac_client_data->disp, context,
+                guac_rdp_get_width(context->instance),
+                guac_rdp_get_height(context->instance));
+
+        /* Store connected channel */
+        guac_rdp_disp_connect(guac_client_data->disp, disp);
+        guac_client_log(client, GUAC_LOG_DEBUG,
+                "Display update channel connected.");
+
+    }
+#endif
+
+}
+#endif
 
 BOOL rdp_freerdp_pre_connect(freerdp* instance) {
 
@@ -159,47 +263,78 @@ BOOL rdp_freerdp_pre_connect(freerdp* instance) {
     freerdp_register_addin_provider(freerdp_channels_load_static_addin_entry, 0);
 #endif
 
+#ifdef HAVE_FREERDP_EVENT_PUBSUB
+    /* Subscribe to and handle channel connected events */
+    PubSub_SubscribeChannelConnected(context->pubSub,
+            (pChannelConnectedEventHandler) guac_rdp_channel_connected);
+#endif
+
+#ifdef HAVE_FREERDP_DISPLAY_UPDATE_SUPPORT
+    /* Load virtual channel management plugin */
+    if (freerdp_channels_load_plugin(channels, instance->settings,
+                "drdynvc", instance->settings))
+        guac_client_log(client, GUAC_LOG_WARNING,
+                "Failed to load drdynvc plugin.");
+
+    /* Init display update plugin */
+    guac_client_data->disp = guac_rdp_disp_alloc();
+    guac_rdp_disp_load_plugin(instance->context);
+#endif
+
     /* Load clipboard plugin */
     if (freerdp_channels_load_plugin(channels, instance->settings,
                 "cliprdr", NULL))
-        guac_client_log_error(client, "Failed to load cliprdr plugin.");
+        guac_client_log(client, GUAC_LOG_WARNING,
+                "Failed to load cliprdr plugin. Clipboard will not work.");
 
     /* If audio enabled, choose an encoder */
     if (guac_client_data->settings.audio_enabled) {
 
-        guac_client_data->audio = guac_audio_stream_alloc(client, NULL);
+        guac_client_data->audio = guac_audio_stream_alloc(client, NULL,
+                GUAC_RDP_AUDIO_RATE,
+                GUAC_RDP_AUDIO_CHANNELS,
+                GUAC_RDP_AUDIO_BPS);
 
-        /* If an encoding is available, load the sound plugin */
-        if (guac_client_data->audio != NULL) {
-
-            /* Load sound plugin */
-            if (freerdp_channels_load_plugin(channels, instance->settings,
-                        "guacsnd", guac_client_data->audio))
-                guac_client_log_error(client,
-                        "Failed to load guacsnd plugin.");
-
-        }
-        else
-            guac_client_log_info(client,
+        /* Warn if no audio encoding is available */
+        if (guac_client_data->audio == NULL)
+            guac_client_log(client, GUAC_LOG_INFO,
                     "No available audio encoding. Sound disabled.");
 
     } /* end if audio enabled */
 
     /* Load filesystem if drive enabled */
     if (guac_client_data->settings.drive_enabled) {
+
+        /* Allocate filesystem */
         guac_client_data->filesystem =
-            guac_rdp_fs_alloc(guac_client_data->settings.drive_path);
+            guac_rdp_fs_alloc(client, guac_client_data->settings.drive_path,
+                    guac_client_data->settings.create_drive_path);
+
+        /* Use for basic uploads if no other handler set */
+        if (client->file_handler == NULL)
+            client->file_handler = guac_rdp_upload_file_handler;
+
     }
 
-    /* If RDPDR required, load it */
+    /* If RDPSND/RDPDR required, load them */
     if (guac_client_data->settings.printing_enabled
-        || guac_client_data->settings.drive_enabled) {
+        || guac_client_data->settings.drive_enabled
+        || guac_client_data->settings.audio_enabled) {
 
         /* Load RDPDR plugin */
         if (freerdp_channels_load_plugin(channels, instance->settings,
                     "guacdr", client))
-            guac_client_log_error(client,
-                    "Failed to load guacdr plugin.");
+            guac_client_log(client, GUAC_LOG_WARNING,
+                    "Failed to load guacdr plugin. Drive redirection and "
+                    "printing will not work. Sound MAY not work.");
+
+        /* Load RDPSND plugin */
+        if (freerdp_channels_load_plugin(channels, instance->settings,
+                    "guacsnd", client))
+            guac_client_log(client, GUAC_LOG_WARNING,
+                    "Failed to load guacsnd alongside guacdr plugin. Sound "
+                    "will not work. Drive redirection and printing MAY not "
+                    "work.");
 
     }
 
@@ -220,12 +355,14 @@ BOOL rdp_freerdp_pre_connect(freerdp* instance) {
         /* Attempt to load rail */
         if (freerdp_channels_load_plugin(channels, instance->settings,
                     "rail", plugin_data))
-            guac_client_log_error(client, "Failed to load rail plugin.");
+            guac_client_log(client, GUAC_LOG_WARNING,
+                    "Failed to load rail plugin. RemoteApp will not work.");
 #else
         /* Attempt to load rail */
         if (freerdp_channels_load_plugin(channels, instance->settings,
                     "rail", instance->settings))
-            guac_client_log_error(client, "Failed to load rail plugin.");
+            guac_client_log(client, GUAC_LOG_WARNING,
+                    "Failed to load rail plugin. RemoteApp will not work.");
 #endif
 
     }
@@ -241,8 +378,8 @@ BOOL rdp_freerdp_pre_connect(freerdp* instance) {
             /* Attempt to load guacsvc plugin for new static channel */
             if (freerdp_channels_load_plugin(channels, instance->settings,
                         "guacsvc", svc)) {
-                guac_client_log_error(client,
-                        "Failed to load guacsvc plugin for channel \"%s\".",
+                guac_client_log(client, GUAC_LOG_WARNING,
+                        "Cannot create static channel \"%s\": failed to load guacsvc plugin.",
                         svc->name);
                 guac_rdp_free_svc(svc);
             }
@@ -250,7 +387,7 @@ BOOL rdp_freerdp_pre_connect(freerdp* instance) {
             /* Store and log on success */
             else {
                 guac_rdp_add_svc(client, svc);
-                guac_client_log_info(client, "Created static channel \"%s\"...",
+                guac_client_log(client, GUAC_LOG_INFO, "Created static channel \"%s\"...",
                         svc->name);
             }
 
@@ -353,10 +490,10 @@ BOOL rdp_freerdp_post_connect(freerdp* instance) {
     client->handle_messages = rdp_guac_client_handle_messages;
     client->mouse_handler = rdp_guac_client_mouse_handler;
     client->key_handler = rdp_guac_client_key_handler;
+    client->size_handler = rdp_guac_client_size_handler;
 
     /* Stream handlers */
     client->clipboard_handler = guac_rdp_clipboard_handler;
-    client->file_handler = guac_rdp_upload_file_handler;
     client->pipe_handler = guac_rdp_svc_pipe_handler;
 
     return TRUE;
@@ -370,7 +507,7 @@ BOOL rdp_freerdp_authenticate(freerdp* instance, char** username,
     guac_client* client = ((rdp_freerdp_context*) context)->client;
 
     /* Warn if connection is likely to fail due to lack of credentials */
-    guac_client_log_info(client,
+    guac_client_log(client, GUAC_LOG_INFO,
             "Authentication requested but username or password not given");
     return TRUE;
 
@@ -386,11 +523,11 @@ BOOL rdp_freerdp_verify_certificate(freerdp* instance, char* subject,
 
     /* Bypass validation if ignore_certificate given */
     if (guac_client_data->settings.ignore_certificate) {
-        guac_client_log_info(client, "Certificate validation bypassed");
+        guac_client_log(client, GUAC_LOG_INFO, "Certificate validation bypassed");
         return TRUE;
     }
 
-    guac_client_log_info(client, "Certificate validation failed");
+    guac_client_log(client, GUAC_LOG_INFO, "Certificate validation failed");
     return FALSE;
 
 }
@@ -417,7 +554,7 @@ void __guac_rdp_client_load_keymap(guac_client* client,
         __guac_rdp_client_load_keymap(client, keymap->parent);
 
     /* Log load */
-    guac_client_log_info(client, "Loading keymap \"%s\"", keymap->name);
+    guac_client_log(client, GUAC_LOG_INFO, "Loading keymap \"%s\"", keymap->name);
 
     /* Load mapping into keymap */
     while (mapping->keysym != 0) {
@@ -430,30 +567,6 @@ void __guac_rdp_client_load_keymap(guac_client* client,
         mapping++;
 
     }
-
-}
-
-/**
- * Reduces the resolution of the client to the given resolution in DPI if
- * doing so is reasonable. This function returns non-zero if the resolution
- * was successfully reduced to the given DPI, and zero if reduction failed.
- */
-static int __guac_rdp_reduce_resolution(guac_client* client, int resolution) {
-
-    int width  = client->info.optimal_width  * resolution / client->info.optimal_resolution;
-    int height = client->info.optimal_height * resolution / client->info.optimal_resolution;
-
-    /* Reduced resolution if result is reasonably sized */
-    if (width*height >= GUAC_RDP_REASONABLE_AREA) {
-        client->info.optimal_width = width;
-        client->info.optimal_height = height;
-        client->info.optimal_resolution = resolution;
-        guac_client_log_info(client, "Reducing resolution to %ix%i at %i DPI", width, height, resolution);
-        return 1;
-    }
-
-    /* No reduction performed */
-    return 0;
 
 }
 
@@ -510,31 +623,31 @@ int guac_client_init(guac_client* client, int argc, char** argv) {
 
     /* NLA security */
     if (strcmp(argv[IDX_SECURITY], "nla") == 0) {
-        guac_client_log_info(client, "Security mode: NLA");
+        guac_client_log(client, GUAC_LOG_INFO, "Security mode: NLA");
         settings->security_mode = GUAC_SECURITY_NLA;
     }
 
     /* TLS security */
     else if (strcmp(argv[IDX_SECURITY], "tls") == 0) {
-        guac_client_log_info(client, "Security mode: TLS");
+        guac_client_log(client, GUAC_LOG_INFO, "Security mode: TLS");
         settings->security_mode = GUAC_SECURITY_TLS;
     }
 
     /* RDP security */
     else if (strcmp(argv[IDX_SECURITY], "rdp") == 0) {
-        guac_client_log_info(client, "Security mode: RDP");
+        guac_client_log(client, GUAC_LOG_INFO, "Security mode: RDP");
         settings->security_mode = GUAC_SECURITY_RDP;
     }
 
     /* ANY security (allow server to choose) */
     else if (strcmp(argv[IDX_SECURITY], "any") == 0) {
-        guac_client_log_info(client, "Security mode: ANY");
+        guac_client_log(client, GUAC_LOG_INFO, "Security mode: ANY");
         settings->security_mode = GUAC_SECURITY_ANY;
     }
 
     /* If nothing given, default to RDP */
     else {
-        guac_client_log_info(client, "No security mode specified. Defaulting to RDP.");
+        guac_client_log(client, GUAC_LOG_INFO, "No security mode specified. Defaulting to RDP.");
         settings->security_mode = GUAC_SECURITY_RDP;
     }
 
@@ -546,26 +659,29 @@ int guac_client_init(guac_client* client, int argc, char** argv) {
     if (argv[IDX_PORT][0] != '\0')
         settings->port = atoi(argv[IDX_PORT]);
 
-    guac_client_log_info(client, "Client resolution is %ix%i at %i DPI",
+    guac_client_log(client, GUAC_LOG_DEBUG,
+            "Client resolution is %ix%i at %i DPI",
             client->info.optimal_width,
             client->info.optimal_height,
             client->info.optimal_resolution);
 
-    /* Attempt to reduce resolution for high DPI */
-    if (client->info.optimal_resolution > GUAC_RDP_NATIVE_RESOLUTION
-            && !__guac_rdp_reduce_resolution(client, GUAC_RDP_NATIVE_RESOLUTION)
-            && !__guac_rdp_reduce_resolution(client, GUAC_RDP_HIGH_RESOLUTION))
-        guac_client_log_info(client, "No reasonable lower resolution");
+    /* Use suggested resolution unless overridden */
+    settings->resolution = guac_rdp_suggest_resolution(client);
+    if (argv[IDX_DPI][0] != '\0')
+        settings->resolution = atoi(argv[IDX_DPI]);
 
     /* Use optimal width unless overridden */
-    settings->width = client->info.optimal_width;
+    settings->width = client->info.optimal_width
+                    * settings->resolution
+                    / client->info.optimal_resolution;
+
     if (argv[IDX_WIDTH][0] != '\0')
         settings->width = atoi(argv[IDX_WIDTH]);
 
     /* Use default width if given width is invalid. */
     if (settings->width <= 0) {
         settings->width = RDP_DEFAULT_WIDTH;
-        guac_client_log_error(client,
+        guac_client_log(client, GUAC_LOG_ERROR,
                 "Invalid width: \"%s\". Using default of %i.",
                 argv[IDX_WIDTH], settings->width);
     }
@@ -574,17 +690,26 @@ int guac_client_init(guac_client* client, int argc, char** argv) {
     settings->width = settings->width & ~0x3;
 
     /* Use optimal height unless overridden */
-    settings->height = client->info.optimal_height;
+    settings->height = client->info.optimal_height
+                     * settings->resolution
+                     / client->info.optimal_resolution;
+
     if (argv[IDX_HEIGHT][0] != '\0')
         settings->height = atoi(argv[IDX_HEIGHT]);
 
     /* Use default height if given height is invalid. */
     if (settings->height <= 0) {
         settings->height = RDP_DEFAULT_HEIGHT;
-        guac_client_log_error(client,
+        guac_client_log(client, GUAC_LOG_ERROR,
                 "Invalid height: \"%s\". Using default of %i.",
                 argv[IDX_WIDTH], settings->height);
     }
+
+    guac_client_log(client, GUAC_LOG_DEBUG,
+            "Using resolution of %ix%i at %i DPI",
+            settings->width,
+            settings->height,
+            settings->resolution);
 
     /* Domain */
     settings->domain = NULL;
@@ -600,6 +725,11 @@ int guac_client_init(guac_client* client, int argc, char** argv) {
     settings->password = NULL;
     if (argv[IDX_PASSWORD][0] != '\0')
         settings->password = strdup(argv[IDX_PASSWORD]);
+
+    /* Client name */
+    settings->client_name = NULL;
+    if (argv[IDX_CLIENT_NAME][0] != '\0')
+        settings->client_name = strdup(argv[IDX_CLIENT_NAME]);
 
     /* Initial program */
     settings->initial_program = NULL;
@@ -626,6 +756,14 @@ int guac_client_init(guac_client* client, int argc, char** argv) {
     if (argv[IDX_STATIC_CHANNELS][0] != '\0')
         settings->svc_names = guac_split(argv[IDX_STATIC_CHANNELS], ',');
 
+    /* Performance flags */
+    settings->wallpaper_enabled           = (strcmp(argv[IDX_ENABLE_WALLPAPER],           "true") == 0);
+    settings->theming_enabled             = (strcmp(argv[IDX_ENABLE_THEMING],             "true") == 0);
+    settings->font_smoothing_enabled      = (strcmp(argv[IDX_ENABLE_FONT_SMOOTHING],      "true") == 0);
+    settings->full_window_drag_enabled    = (strcmp(argv[IDX_ENABLE_FULL_WINDOW_DRAG],    "true") == 0);
+    settings->desktop_composition_enabled = (strcmp(argv[IDX_ENABLE_DESKTOP_COMPOSITION], "true") == 0);
+    settings->menu_animations_enabled     = (strcmp(argv[IDX_ENABLE_MENU_ANIMATIONS],     "true") == 0);
+
     /* Session color depth */
     settings->color_depth = RDP_DEFAULT_DEPTH;
     if (argv[IDX_COLOR_DEPTH][0] != '\0')
@@ -634,10 +772,49 @@ int guac_client_init(guac_client* client, int argc, char** argv) {
     /* Use default depth if given depth is invalid. */
     if (settings->color_depth == 0) {
         settings->color_depth = RDP_DEFAULT_DEPTH;
-        guac_client_log_error(client,
+        guac_client_log(client, GUAC_LOG_ERROR,
                 "Invalid color-depth: \"%s\". Using default of %i.",
                 argv[IDX_WIDTH], settings->color_depth);
     }
+
+    /* Preconnection ID */
+    settings->preconnection_id = -1;
+    if (argv[IDX_PRECONNECTION_ID][0] != '\0') {
+
+        /* Parse preconnection ID, warn if invalid */
+        int preconnection_id = atoi(argv[IDX_PRECONNECTION_ID]);
+        if (preconnection_id < 0)
+            guac_client_log(client, GUAC_LOG_WARNING,
+                    "Ignoring invalid preconnection ID: %i",
+                    preconnection_id);
+
+        /* Otherwise, assign specified ID */
+        else {
+            settings->preconnection_id = preconnection_id;
+            guac_client_log(client, GUAC_LOG_DEBUG,
+                    "Preconnection ID: %i", settings->preconnection_id);
+        }
+
+    }
+
+    /* Preconnection BLOB */
+    settings->preconnection_blob = NULL;
+    if (argv[IDX_PRECONNECTION_BLOB][0] != '\0') {
+        settings->preconnection_blob = strdup(argv[IDX_PRECONNECTION_BLOB]);
+        guac_client_log(client, GUAC_LOG_DEBUG,
+                "Preconnection BLOB: \"%s\"", settings->preconnection_blob);
+    }
+
+#ifndef HAVE_RDPSETTINGS_SENDPRECONNECTIONPDU
+    /* Warn if support for the preconnection BLOB / ID is absent */
+    if (settings->preconnection_blob != NULL
+            || settings->preconnection_id != -1) {
+        guac_client_log(client, GUAC_LOG_WARNING,
+                "Installed version of FreeRDP lacks support for the "
+                "preconnection PDU. The specified preconnection BLOB and/or "
+                "ID will be ignored.");
+    }
+#endif
 
     /* Audio enable/disable */
     guac_client_data->settings.audio_enabled =
@@ -652,6 +829,9 @@ int guac_client_init(guac_client* client, int argc, char** argv) {
         (strcmp(argv[IDX_ENABLE_DRIVE], "true") == 0);
 
     guac_client_data->settings.drive_path = strdup(argv[IDX_DRIVE_PATH]);
+
+    guac_client_data->settings.create_drive_path =
+        (strcmp(argv[IDX_CREATE_DRIVE_PATH], "true") == 0);
 
     /* Store client data */
     guac_client_data->rdp_inst = rdp_inst;
@@ -697,9 +877,111 @@ int guac_client_init(guac_client* client, int argc, char** argv) {
     /* Load keymap into client */
     __guac_rdp_client_load_keymap(client, settings->server_layout);
 
+#ifdef ENABLE_COMMON_SSH
+    guac_common_ssh_init(client);
+
+    /* Connect via SSH if SFTP is enabled */
+    if (strcmp(argv[IDX_ENABLE_SFTP], "true") == 0) {
+
+        guac_client_log(client, GUAC_LOG_DEBUG,
+                "Connecting via SSH for SFTP filesystem access.");
+
+        /* Parse username - use RDP username by default */
+        const char* sftp_username = argv[IDX_SFTP_USERNAME];
+        if (sftp_username[0] == '\0' && settings->username != NULL)
+            sftp_username = settings->username;
+
+        guac_client_data->sftp_user =
+            guac_common_ssh_create_user(sftp_username);
+
+        /* Import private key, if given */
+        if (argv[IDX_SFTP_PRIVATE_KEY][0] != '\0') {
+
+            guac_client_log(client, GUAC_LOG_DEBUG,
+                    "Authenticating with private key.");
+
+            /* Abort if private key cannot be read */
+            if (guac_common_ssh_user_import_key(guac_client_data->sftp_user,
+                        argv[IDX_SFTP_PRIVATE_KEY],
+                        argv[IDX_SFTP_PASSPHRASE])) {
+                guac_common_ssh_destroy_user(guac_client_data->sftp_user);
+                return 1;
+            }
+
+        }
+
+        /* Otherwise, use specified password */
+        else {
+
+            guac_client_log(client, GUAC_LOG_DEBUG,
+                    "Authenticating with password.");
+
+            /* Parse password - use RDP password by default */
+            const char* sftp_password = argv[IDX_SFTP_PASSWORD];
+            if (sftp_password[0] == '\0' && settings->password != NULL)
+                sftp_password = settings->password;
+
+            guac_common_ssh_user_set_password(guac_client_data->sftp_user,
+                    sftp_password);
+
+        }
+
+        /* Parse hostname - use RDP hostname by default */
+        const char* sftp_hostname = argv[IDX_SFTP_HOSTNAME];
+        if (sftp_hostname[0] == '\0')
+            sftp_hostname = settings->hostname;
+
+        /* Parse port, defaulting to standard SSH port */
+        const char* sftp_port = argv[IDX_SFTP_PORT];
+        if (sftp_port[0] == '\0')
+            sftp_port = "22";
+
+        /* Attempt SSH connection */
+        guac_client_data->sftp_session =
+            guac_common_ssh_create_session(client, sftp_hostname, sftp_port,
+                    guac_client_data->sftp_user);
+
+        /* Fail if SSH connection does not succeed */
+        if (guac_client_data->sftp_session == NULL) {
+            /* Already aborted within guac_common_ssh_create_session() */
+            guac_common_ssh_destroy_user(guac_client_data->sftp_user);
+            return 1;
+        }
+
+        /* Load and expose filesystem */
+        guac_client_data->sftp_filesystem =
+            guac_common_ssh_create_sftp_filesystem(
+                    guac_client_data->sftp_session, "/");
+
+        /* Abort if SFTP connection fails */
+        if (guac_client_data->sftp_filesystem == NULL) {
+            guac_common_ssh_destroy_session(guac_client_data->sftp_session);
+            guac_common_ssh_destroy_user(guac_client_data->sftp_user);
+            return 1;
+        }
+
+        /* Configure destination for basic uploads, if specified */
+        if (argv[IDX_SFTP_DIRECTORY][0] != '\0') {
+            client->file_handler = guac_rdp_sftp_file_handler;
+            guac_common_ssh_sftp_set_upload_path(
+                    guac_client_data->sftp_filesystem,
+                    argv[IDX_SFTP_DIRECTORY]);
+        }
+
+        /* Otherwise, use SFTP for basic uploads only if drive not enabled */
+        else if (!settings->drive_enabled)
+            client->file_handler = guac_rdp_sftp_file_handler;
+
+        guac_client_log(client, GUAC_LOG_DEBUG,
+                "SFTP connection succeeded.");
+
+    }
+#endif
+
     /* Create default surface */
-    guac_client_data->default_surface = guac_common_surface_alloc(client->socket, GUAC_DEFAULT_LAYER,
-                                                                  settings->width, settings->height);
+    guac_client_data->default_surface = guac_common_surface_alloc(client,
+            client->socket, GUAC_DEFAULT_LAYER,
+            settings->width, settings->height);
     guac_client_data->current_surface = guac_client_data->default_surface;
 
     /* Send connection name */

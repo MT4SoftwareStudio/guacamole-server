@@ -23,7 +23,6 @@
 #include "config.h"
 
 #include "client.h"
-#include "debug.h"
 #include "rdp_fs.h"
 #include "rdp_settings.h"
 #include "rdp_stream.h"
@@ -107,7 +106,7 @@ void guac_rdpdr_process_connect(rdpSvcPlugin* plugin) {
         guac_rdpdr_register_fs(rdpdr);
 
     /* Log that printing, etc. has been loaded */
-    guac_client_log_info(client, "guacdr connected.");
+    guac_client_log(client, GUAC_LOG_INFO, "guacdr connected.");
 
 }
 
@@ -118,7 +117,7 @@ void guac_rdpdr_process_terminate(rdpSvcPlugin* plugin) {
 
     for (i=0; i<rdpdr->devices_registered; i++) {
         guac_rdpdr_device* device = &(rdpdr->devices[i]);
-        guac_client_log_info(rdpdr->client, "Unloading device %i (%s)",
+        guac_client_log(rdpdr->client, GUAC_LOG_INFO, "Unloading device %i (%s)",
                 device->device_id, device->device_name);
         device->free_handler(device);
     }
@@ -173,7 +172,7 @@ void guac_rdpdr_process_receive(rdpSvcPlugin* plugin,
                 break;
 
             default:
-                guac_client_log_info(rdpdr->client, "Ignoring RDPDR core packet with unexpected ID: 0x%04x", packet_id);
+                guac_client_log(rdpdr->client, GUAC_LOG_INFO, "Ignoring RDPDR core packet with unexpected ID: 0x%04x", packet_id);
 
         }
 
@@ -194,14 +193,14 @@ void guac_rdpdr_process_receive(rdpSvcPlugin* plugin,
                 break;
 
             default:
-                guac_client_log_info(rdpdr->client, "Ignoring RDPDR printer packet with unexpected ID: 0x%04x", packet_id);
+                guac_client_log(rdpdr->client, GUAC_LOG_INFO, "Ignoring RDPDR printer packet with unexpected ID: 0x%04x", packet_id);
 
         }
 
     } /* end if printer */
 
     else
-        guac_client_log_info(rdpdr->client, "Ignoring packet for unknown RDPDR component: 0x%04x", component);
+        guac_client_log(rdpdr->client, GUAC_LOG_INFO, "Ignoring packet for unknown RDPDR component: 0x%04x", component);
 
 }
 
@@ -261,7 +260,8 @@ void guac_rdpdr_start_download(guac_rdpdr_device* device, const char* path) {
 
         } while (c != '\0');
 
-        GUAC_RDP_DEBUG(2, "Initiating download of \"%s\"", path);
+        guac_client_log(device->rdpdr->client, GUAC_LOG_DEBUG,
+                "%s: Initiating download of \"%s\"", __func__, path);
 
         /* Begin stream */
         guac_protocol_send_file(client->socket, stream,
@@ -270,7 +270,7 @@ void guac_rdpdr_start_download(guac_rdpdr_device* device, const char* path) {
 
     }
     else
-        guac_client_log_error(client, "Unable to download \"%s\"", path);
+        guac_client_log(client, GUAC_LOG_ERROR, "Unable to download \"%s\"", path);
 
 }
 

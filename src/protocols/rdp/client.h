@@ -33,6 +33,16 @@
 #include "rdp_keymap.h"
 #include "rdp_settings.h"
 
+#ifdef ENABLE_COMMON_SSH
+#include "guac_sftp.h"
+#include "guac_ssh.h"
+#include "guac_ssh_user.h"
+#endif
+
+#ifdef HAVE_FREERDP_DISPLAY_UPDATE_SUPPORT
+#include "rdp_disp.h"
+#endif
+
 #include <freerdp/freerdp.h>
 #include <freerdp/codec/color.h>
 #include <guacamole/audio.h>
@@ -76,6 +86,27 @@
  * The maximum number of bytes to allow within the clipboard.
  */
 #define GUAC_RDP_CLIPBOARD_MAX_LENGTH 262144
+
+/**
+ * Initial rate of audio to stream, in Hz. If the RDP server uses a different
+ * value, the Guacamole audio stream will simply be reset appropriately.
+ */
+#define GUAC_RDP_AUDIO_RATE 44100
+
+/**
+ * The number of channels to stream for audio. If the RDP server uses a
+ * different value, the Guacamole audio stream will simply be reset
+ * appropriately.
+ */
+#define GUAC_RDP_AUDIO_CHANNELS 2
+
+/**
+ * The number of bits per sample within the audio stream. If the RDP server
+ * uses a different value, the Guacamole audio stream will simply be reset
+ * appropriately.
+ */
+#define GUAC_RDP_AUDIO_BPS 16
+
 
 /**
  * Client data that will remain accessible through the guac_client.
@@ -153,6 +184,30 @@ typedef struct rdp_guac_client_data {
      */
     guac_rdp_fs* filesystem;
 
+#ifdef ENABLE_COMMON_SSH
+    /**
+     * The user and credentials used to authenticate for SFTP.
+     */
+    guac_common_ssh_user* sftp_user;
+
+    /**
+     * The SSH session used for SFTP.
+     */
+    guac_common_ssh_session* sftp_session;
+
+    /**
+     * The exposed filesystem object, implemented with SFTP.
+     */
+    guac_object* sftp_filesystem;
+#endif
+
+#ifdef HAVE_FREERDP_DISPLAY_UPDATE_SUPPORT
+    /**
+     * Display size update module.
+     */
+    guac_rdp_disp* disp;
+#endif
+
     /**
      * List of all available static virtual channels.
      */
@@ -191,6 +246,11 @@ typedef struct rdp_freerdp_context {
      * Color conversion structure to be used to convert RDP images to PNGs.
      */
     CLRCONV* clrconv;
+
+    /**
+     * The current color palette, as received from the RDP server.
+     */
+    UINT32 palette[256];
 
 } rdp_freerdp_context;
 

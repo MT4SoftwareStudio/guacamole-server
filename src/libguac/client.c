@@ -24,14 +24,21 @@
 
 #include "client.h"
 #include "client-handlers.h"
+#include "encode-jpeg.h"
+#include "encode-png.h"
 #include "error.h"
 #include "instruction.h"
 #include "layer.h"
+#include "object.h"
 #include "pool.h"
 #include "protocol.h"
 #include "socket.h"
 #include "stream.h"
 #include "timestamp.h"
+
+#ifdef ENABLE_WEBP
+#include "encode-webp.h"
+#endif
 
 #ifdef HAVE_OSSP_UUID_H
 #include <ossp/uuid.h>
@@ -124,6 +131,39 @@ void guac_client_free_stream(guac_client* client, guac_stream* stream) {
 
 }
 
+guac_object* guac_client_alloc_object(guac_client* client) {
+
+    guac_object* allocd_object;
+    int object_index;
+
+    /* Refuse to allocate beyond maximum */
+    if (client->__object_pool->active == GUAC_CLIENT_MAX_OBJECTS)
+        return NULL;
+
+    /* Allocate object */
+    object_index = guac_pool_next_int(client->__object_pool);
+
+    /* Initialize object */
+    allocd_object = &(client->__objects[object_index]);
+    allocd_object->index = object_index;
+    allocd_object->data = NULL;
+    allocd_object->get_handler = NULL;
+    allocd_object->put_handler = NULL;
+
+    return allocd_object;
+
+}
+
+void guac_client_free_object(guac_client* client, guac_object* object) {
+
+    /* Release index to pool */
+    guac_pool_free_int(client->__object_pool, object->index);
+
+    /* Mark object as undefined */
+    object->index = GUAC_CLIENT_UNDEFINED_OBJECT_INDEX;
+
+}
+
 /**
  * Returns a newly allocated string containing a guaranteed-unique connection
  * identifier string which is 37 characters long and begins with a '$'
@@ -169,7 +209,7 @@ static char* __guac_generate_connection_id() {
     if (uuid_export(uuid, UUID_FMT_STR, &identifier, &identifier_length) != UUID_RC_OK) {
         free(buffer);
         uuid_destroy(uuid);
-        guac_error = GUAC_STATUS_BAD_STATE;
+        guac_error = GUAC_STATUS_INTERNAL_ERROR;
         guac_error_message = "Conversion of UUID to connection ID failed";
         return NULL;
     }
@@ -216,7 +256,7 @@ guac_client* guac_client_alloc() {
     /* Allocate stream pool */
     client->__stream_pool = guac_pool_alloc(0);
 
-    /* Initialze streams */
+    /* Initialize streams */
     client->__input_streams = malloc(sizeof(guac_stream) * GUAC_CLIENT_MAX_STREAMS);
     client->__output_streams = malloc(sizeof(guac_stream) * GUAC_CLIENT_MAX_STREAMS);
 
@@ -224,6 +264,14 @@ guac_client* guac_client_alloc() {
         client->__input_streams[i].index = GUAC_CLIENT_CLOSED_STREAM_INDEX;
         client->__output_streams[i].index = GUAC_CLIENT_CLOSED_STREAM_INDEX;
     }
+
+    /* Allocate object pool */
+    client->__object_pool = guac_pool_alloc(0);
+
+    /* Initialize objects */
+    client->__objects = malloc(sizeof(guac_object) * GUAC_CLIENT_MAX_OBJECTS);
+    for (i=0; i<GUAC_CLIENT_MAX_OBJECTS; i++)
+        client->__objects[i].index = GUAC_CLIENT_UNDEFINED_OBJECT_INDEX;
 
     return client;
 
@@ -249,6 +297,12 @@ void guac_client_free(guac_client* client) {
     /* Free stream pool */
     guac_pool_free(client->__stream_pool);
 
+    /* Free objects */
+    free(client->__objects);
+
+    /* Free object pool */
+    guac_pool_free(client->__object_pool);
+
     free(client);
 }
 
@@ -270,41 +324,22 @@ int guac_client_handle_instruction(guac_client* client, guac_instruction* instru
 
 }
 
-void vguac_client_log_info(guac_client* client, const char* format,
-        va_list ap) {
+void vguac_client_log(guac_client* client, guac_client_log_level level,
+        const char* format, va_list ap) {
 
     /* Call handler if defined */
-    if (client->log_info_handler != NULL)
-        client->log_info_handler(client, format, ap);
+    if (client->log_handler != NULL)
+        client->log_handler(client, level, format, ap);
 
 }
 
-void vguac_client_log_error(guac_client* client, const char* format,
-        va_list ap) {
-
-    /* Call handler if defined */
-    if (client->log_error_handler != NULL)
-        client->log_error_handler(client, format, ap);
-
-}
-
-void guac_client_log_info(guac_client* client, const char* format, ...) {
+void guac_client_log(guac_client* client, guac_client_log_level level,
+        const char* format, ...) {
 
     va_list args;
     va_start(args, format);
 
-    vguac_client_log_info(client, format, args);
-
-    va_end(args);
-
-}
-
-void guac_client_log_error(guac_client* client, const char* format, ...) {
-
-    va_list args;
-    va_start(args, format);
-
-    vguac_client_log_error(client, format, args);
+    vguac_client_log(client, level, format, args);
 
     va_end(args);
 
@@ -321,7 +356,7 @@ void vguac_client_abort(guac_client* client, guac_protocol_status status,
     if (client->state == GUAC_CLIENT_RUNNING) {
 
         /* Log detail of error */
-        vguac_client_log_error(client, format, ap);
+        vguac_client_log(client, GUAC_LOG_ERROR, format, ap);
 
         /* Send error immediately, limit information given */
         guac_protocol_send_error(client->socket, "Aborted. See logs.", status);
@@ -343,6 +378,99 @@ void guac_client_abort(guac_client* client, guac_protocol_status status,
     vguac_client_abort(client, status, format, args);
 
     va_end(args);
+
+}
+
+void guac_client_stream_png(guac_client* client, guac_socket* socket,
+        guac_composite_mode mode, const guac_layer* layer, int x, int y,
+        cairo_surface_t* surface) {
+
+    /* Allocate new stream for image */
+    guac_stream* stream = guac_client_alloc_stream(client);
+
+    /* Declare stream as containing image data */
+    guac_protocol_send_img(socket, stream, mode, layer, "image/png", x, y);
+
+    /* Write PNG data */
+    guac_png_write(socket, stream, surface);
+
+    /* Terminate stream */
+    guac_protocol_send_end(socket, stream);
+
+    /* Free allocated stream */
+    guac_client_free_stream(client, stream);
+
+}
+
+void guac_client_stream_jpeg(guac_client* client, guac_socket* socket,
+        guac_composite_mode mode, const guac_layer* layer, int x, int y,
+        cairo_surface_t* surface, int quality) {
+
+    /* Allocate new stream for image */
+    guac_stream* stream = guac_client_alloc_stream(client);
+
+    /* Declare stream as containing image data */
+    guac_protocol_send_img(socket, stream, mode, layer, "image/jpeg", x, y);
+
+    /* Write JPEG data */
+    guac_jpeg_write(socket, stream, surface, quality);
+
+    /* Terminate stream */
+    guac_protocol_send_end(socket, stream);
+
+    /* Free allocated stream */
+    guac_client_free_stream(client, stream);
+
+}
+
+void guac_client_stream_webp(guac_client* client, guac_socket* socket,
+        guac_composite_mode mode, const guac_layer* layer, int x, int y,
+        cairo_surface_t* surface, int quality, int lossless) {
+
+#ifdef ENABLE_WEBP
+    /* Allocate new stream for image */
+    guac_stream* stream = guac_client_alloc_stream(client);
+
+    /* Declare stream as containing image data */
+    guac_protocol_send_img(socket, stream, mode, layer, "image/webp", x, y);
+
+    /* Write WebP data */
+    guac_webp_write(socket, stream, surface, quality, lossless);
+
+    /* Terminate stream */
+    guac_protocol_send_end(socket, stream);
+
+    /* Free allocated stream */
+    guac_client_free_stream(client, stream);
+#else
+    /* Do nothing if WebP support is not built in */
+#endif
+
+}
+
+int guac_client_supports_webp(guac_client* client) {
+
+#ifdef ENABLE_WEBP
+    char** mimetype = client->info.image_mimetypes;
+
+    /* Search for WebP mimetype in list of supported image mimetypes */
+    while (*mimetype != NULL) {
+
+        /* If WebP mimetype found, no need to search further */
+        if (strcmp(*mimetype, "image/webp") == 0)
+            return 1;
+
+        /* Next mimetype */
+        mimetype++;
+
+    }
+
+    /* Client does not support WebP */
+    return 0;
+#else
+    /* Support for WebP is completely absent */
+    return 0;
+#endif
 
 }
 

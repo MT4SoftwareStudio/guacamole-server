@@ -37,6 +37,8 @@
 
 #include "config.h"
 
+#include <guacamole/client.h>
+#include <guacamole/object.h>
 #include <guacamole/pool.h>
 
 #include <dirent.h>
@@ -267,6 +269,16 @@ typedef struct guac_rdp_fs_file {
 typedef struct guac_rdp_fs {
 
     /**
+     * The controlling client.
+     */
+    guac_client* client;
+
+    /**
+     * The underlying filesystem object.
+     */
+    guac_object* object;
+
+    /**
      * The root of the filesystem.
      */
     char* drive_path;
@@ -313,7 +325,7 @@ typedef struct guac_rdp_fs_info {
 /**
  * Allocates a new filesystem given a root path.
  */
-guac_rdp_fs* guac_rdp_fs_alloc(const char* drive_path);
+guac_rdp_fs* guac_rdp_fs_alloc(guac_client* client, const char* drive_path, int create_drive_path);
 
 /**
  * Frees the given filesystem.
@@ -415,6 +427,28 @@ int guac_rdp_fs_matches(const char* filename, const char* pattern);
  * particularly the amount of space available.
  */
 int guac_rdp_fs_get_info(guac_rdp_fs* fs, guac_rdp_fs_info* info);
+
+/**
+ * Concatenates the given filename with the given path, separating the two
+ * with a single forward slash. The full result must be no more than
+ * GUAC_RDP_FS_MAX_PATH bytes long, counting null terminator.
+ *
+ * @param fullpath
+ *     The buffer to store the result within. This buffer must be at least
+ *     GUAC_RDP_FS_MAX_PATH bytes long.
+ *
+ * @param path
+ *     The path to append the filename to.
+ *
+ * @param filename
+ *     The filename to append to the path.
+ *
+ * @return
+ *     Non-zero if the filename is valid and was successfully appended to the
+ *     path, zero otherwise.
+ */
+int guac_rdp_fs_append_filename(char* fullpath, const char* path,
+        const char* filename);
 
 #endif
 

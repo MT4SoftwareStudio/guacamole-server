@@ -246,7 +246,7 @@ int __guac_terminal_set(guac_terminal_display* display, int row, int col, int co
     pango_cairo_show_layout(cairo, layout);
 
     /* Draw */
-    guac_common_surface_draw(display->default_surface,
+    guac_common_surface_draw(display->display_surface,
         display->char_width * col,
         display->char_height * row,
         surface);
@@ -274,17 +274,23 @@ guac_terminal_display* guac_terminal_display_alloc(guac_client* client,
     display->client = client;
 
     /* Create default surface */
-    display->default_surface = guac_common_surface_alloc(client->socket, GUAC_DEFAULT_LAYER, 0, 0);
+    display->display_layer = guac_client_alloc_layer(client);
     display->select_layer = guac_client_alloc_layer(client);
+    display->display_surface = guac_common_surface_alloc(client,
+            client->socket, display->display_layer, 0, 0);
+
+    /* Select layer is a child of the display layer */
+    guac_protocol_send_move(client->socket, display->select_layer,
+            display->display_layer, 0, 0, 0);
 
     /* Get font */
     display->font_desc = pango_font_description_new();
     pango_font_description_set_family(display->font_desc, font_name);
     pango_font_description_set_weight(display->font_desc, PANGO_WEIGHT_NORMAL);
-    pango_font_description_set_size(display->font_desc, font_size*PANGO_SCALE);
+    pango_font_description_set_size(display->font_desc,
+            font_size * PANGO_SCALE * dpi / 96);
 
     font_map = pango_cairo_font_map_get_default();
-    pango_cairo_font_map_set_resolution((PangoCairoFontMap*) font_map, dpi);
     context = pango_font_map_create_context(font_map);
 
     font = pango_font_map_load_font(font_map, context, display->font_desc);
@@ -300,8 +306,8 @@ guac_terminal_display* guac_terminal_display_alloc(guac_client* client,
         return NULL;
     }
 
-    display->glyph_foreground = foreground;
-    display->glyph_background = background;
+    display->default_foreground = display->glyph_foreground = foreground;
+    display->default_background = display->glyph_background = background;
 
     /* Calculate character dimensions */
     display->char_width =
@@ -469,12 +475,12 @@ void guac_terminal_display_resize(guac_terminal_display* display, int width, int
     guac_terminal_operation* current;
     int x, y;
 
-    /* Fill with background color (index 0) */
+    /* Fill with background color */
     guac_terminal_char fill = {
         .value = 0,
         .attributes = {
-            .foreground = 0,
-            .background = 0
+            .foreground = display->default_background,
+            .background = display->default_background
         },
         .width = 1
     };
@@ -516,7 +522,7 @@ void guac_terminal_display_resize(guac_terminal_display* display, int width, int
 
     /* Send display size */
     guac_common_surface_resize(
-            display->default_surface,
+            display->display_surface,
             display->char_width  * width,
             display->char_height * height);
 
@@ -636,13 +642,13 @@ void __guac_terminal_display_flush_copy(guac_terminal_display* display) {
                 /* Send copy */
                 guac_common_surface_copy(
 
-                        display->default_surface,
+                        display->display_surface,
                         current->column * display->char_width,
                         current->row * display->char_height,
                         rect_width * display->char_width,
                         rect_height * display->char_height,
 
-                        display->default_surface,
+                        display->display_surface,
                         col * display->char_width,
                         row * display->char_height);
 
@@ -771,7 +777,7 @@ void __guac_terminal_display_flush_clear(guac_terminal_display* display) {
 
                 /* Send rect */
                 guac_common_surface_rect(
-                        display->default_surface,
+                        display->display_surface,
                         col * display->char_width,
                         row * display->char_height,
                         rect_width * display->char_width,
@@ -835,7 +841,7 @@ void guac_terminal_display_flush(guac_terminal_display* display) {
     __guac_terminal_display_flush_set(display);
 
     /* Flush surface */
-    guac_common_surface_flush(display->default_surface);
+    guac_common_surface_flush(display->display_surface);
 
 }
 

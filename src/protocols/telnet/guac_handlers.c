@@ -63,7 +63,8 @@ int guac_telnet_client_key_handler(guac_client* client, int keysym, int pressed)
     /* Stop searching for password */
     if (client_data->password_regex != NULL) {
 
-        guac_client_log_info(client, "Stopping password prompt search due to user input.");
+        guac_client_log(client, GUAC_LOG_DEBUG,
+                "Stopping password prompt search due to user input.");
 
         regfree(client_data->password_regex);
         free(client_data->password_regex);
@@ -74,12 +75,26 @@ int guac_telnet_client_key_handler(guac_client* client, int keysym, int pressed)
     /* Stop searching for username */
     if (client_data->username_regex != NULL) {
 
-        guac_client_log_info(client, "Stopping username prompt search due to user input.");
+        guac_client_log(client, GUAC_LOG_DEBUG,
+                "Stopping username prompt search due to user input.");
 
         regfree(client_data->username_regex);
         free(client_data->username_regex);
         client_data->username_regex = NULL;
 
+    }
+
+    /* Intercept and handle Pause / Break / Ctrl+0 as "IAC BRK" */
+    if (pressed && (
+                keysym == 0xFF13                  /* Pause */
+             || keysym == 0xFF6B                  /* Break */
+             || (term->mod_ctrl && keysym == '0') /* Ctrl + 0 */
+       )) {
+
+        /* Send IAC BRK */
+        telnet_iac(client_data->telnet, TELNET_BREAK);
+
+        return 0;
     }
 
     /* Send key */

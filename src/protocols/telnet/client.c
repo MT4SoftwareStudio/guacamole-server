@@ -53,7 +53,7 @@ const char* GUAC_CLIENT_ARGS[] = {
     "password-regex",
     "font-name",
     "font-size",
-    "log-file",
+    "color-scheme",
     NULL
 };
 
@@ -102,9 +102,12 @@ enum __TELNET_ARGS_IDX {
     IDX_FONT_SIZE,
 
     /**
-     * Log file
+     * The name of the color scheme to use. Currently valid color schemes are:
+     * "black-white", "white-black", "gray-black", and "green-black", each
+     * following the "foreground-background" pattern. By default, this will be
+     * "gray-black".
      */
-    IDX_LOG_FILE,
+    IDX_COLOR_SCHEME,
 
     TELNET_ARGS_COUNT
 };
@@ -122,7 +125,7 @@ static regex_t* __guac_telnet_compile_regex(guac_client* client, char* pattern) 
 
     /* Notify of failure to parse/compile */
     if (compile_result != 0) {
-        guac_client_log_error(client, "Regular expression '%s' could not be compiled.", pattern);
+        guac_client_log(client, GUAC_LOG_ERROR, "Regular expression '%s' could not be compiled.", pattern);
         free(regex);
         return NULL;
     }
@@ -151,7 +154,7 @@ int guac_client_init(guac_client* client, int argc, char** argv) {
     /* Set locale and warn if not UTF-8 */
     setlocale(LC_CTYPE, "");
     if (strcmp(nl_langinfo(CODESET), "UTF-8") != 0)
-        guac_client_log_info(client, "Current locale does not use UTF-8. Some characters may not render correctly.");
+        guac_client_log(client, GUAC_LOG_INFO, "Current locale does not use UTF-8. Some characters may not render correctly.");
 
     /* Read parameters */
     strcpy(client_data->hostname,  argv[IDX_HOSTNAME]);
@@ -206,7 +209,8 @@ int guac_client_init(guac_client* client, int argc, char** argv) {
     client_data->term = guac_terminal_create(client,
             client_data->font_name, client_data->font_size,
             client->info.optimal_resolution,
-            client->info.optimal_width, client->info.optimal_height);
+            client->info.optimal_width, client->info.optimal_height,
+            argv[IDX_COLOR_SCHEME]);
 
     /* Fail if terminal init failed */
     if (client_data->term == NULL) {

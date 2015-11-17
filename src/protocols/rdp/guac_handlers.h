@@ -32,6 +32,7 @@ int rdp_guac_client_free_handler(guac_client* client);
 int rdp_guac_client_handle_messages(guac_client* client);
 int rdp_guac_client_mouse_handler(guac_client* client, int x, int y, int mask);
 int rdp_guac_client_key_handler(guac_client* client, int keysym, int pressed);
+int rdp_guac_client_size_handler(guac_client* client, int width, int height);
 
 #endif
 

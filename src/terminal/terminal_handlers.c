@@ -342,7 +342,7 @@ int guac_terminal_escape(guac_terminal* term, unsigned char c) {
             break;
 
         default:
-            guac_client_log_info(term->client, "Unhandled ESC sequence: %c", c);
+            guac_client_log(term->client, GUAC_LOG_INFO, "Unhandled ESC sequence: %c", c);
             term->char_handler = guac_terminal_echo; 
 
     }
@@ -849,11 +849,11 @@ int guac_terminal_csi(guac_terminal* term, unsigned char c) {
             default:
                 if (c != ';') {
 
-                    guac_client_log_info(term->client,
+                    guac_client_log(term->client, GUAC_LOG_INFO,
                             "Unhandled CSI sequence: %c", c);
 
                     for (i=0; i<argc; i++)
-                        guac_client_log_info(term->client,
+                        guac_client_log(term->client, GUAC_LOG_INFO,
                                 " -> argv[%i] = %i", i, argv[i]);
 
                 }
@@ -897,6 +897,9 @@ int guac_terminal_set_directory(guac_terminal* term, unsigned char c) {
         term->char_handler = guac_terminal_echo;
         if (term->upload_path_handler)
             term->upload_path_handler(term->client, filename);
+        else
+            guac_client_log(term->client, GUAC_LOG_DEBUG,
+                    "Cannot set upload path. File is transfer not enabled.");
         length = 0;
     }
 
@@ -919,6 +922,9 @@ int guac_terminal_download(guac_terminal* term, unsigned char c) {
         term->char_handler = guac_terminal_echo;
         if (term->file_download_handler)
             term->file_download_handler(term->client, filename);
+        else
+            guac_client_log(term->client, GUAC_LOG_DEBUG,
+                    "Cannot send file. File is transfer not enabled.");
         length = 0;
     }
 
@@ -960,7 +966,7 @@ int guac_terminal_osc(guac_terminal* term, unsigned char c) {
 
     /* Stop on unrecognized character */
     else {
-        guac_client_log_info(term->client, "Unexpected character in OSC: 0x%X", c);
+        guac_client_log(term->client, GUAC_LOG_INFO, "Unexpected character in OSC: 0x%X", c);
         term->char_handler = guac_terminal_echo;
     }
 

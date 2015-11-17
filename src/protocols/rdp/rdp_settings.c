@@ -25,6 +25,7 @@
 #include "rdp_settings.h"
 
 #include <freerdp/constants.h>
+#include <freerdp/settings.h>
 
 #ifdef ENABLE_WINPR
 #include <winpr/wtypes.h>
@@ -33,6 +34,7 @@
 #endif
 
 #include <stddef.h>
+#include <string.h>
 
 int guac_rdp_get_width(freerdp* rdp) {
 #ifdef LEGACY_RDPSETTINGS
@@ -56,6 +58,51 @@ int guac_rdp_get_depth(freerdp* rdp) {
 #else
     return rdp->settings->ColorDepth;
 #endif
+}
+
+/**
+ * Given the settings structure of the Guacamole RDP client, calculates the
+ * standard performance flag value to send to the RDP server. The value of
+ * these flags is dictated by the RDP standard.
+ *
+ * @param guac_settings
+ *     The settings structure to read performance settings from.
+ *
+ * @returns
+ *     The standard RDP performance flag value representing the union of all
+ *     performance settings within the given settings structure.
+ */
+static int guac_rdp_get_performance_flags(guac_rdp_settings* guac_settings) {
+
+    /* No performance flags initially */
+    int flags = PERF_FLAG_NONE;
+
+    /* Desktop wallpaper */
+    if (!guac_settings->wallpaper_enabled)
+        flags |= PERF_DISABLE_WALLPAPER;
+
+    /* Theming of desktop/windows */
+    if (!guac_settings->theming_enabled)
+        flags |= PERF_DISABLE_THEMING;
+
+    /* Font smoothing (ClearType) */
+    if (guac_settings->font_smoothing_enabled)
+        flags |= PERF_ENABLE_FONT_SMOOTHING;
+
+    /* Full-window drag */
+    if (!guac_settings->full_window_drag_enabled)
+        flags |= PERF_DISABLE_FULLWINDOWDRAG;
+
+    /* Desktop composition (Aero) */
+    if (guac_settings->desktop_composition_enabled)
+        flags |= PERF_ENABLE_DESKTOP_COMPOSITION;
+
+    /* Menu animations */
+    if (!guac_settings->menu_animations_enabled)
+        flags |= PERF_DISABLE_MENUANIMATIONS;
+
+    return flags;
+
 }
 
 void guac_rdp_push_settings(guac_rdp_settings* guac_settings, freerdp* rdp) {
@@ -98,6 +145,24 @@ void guac_rdp_push_settings(guac_rdp_settings* guac_settings, freerdp* rdp) {
     rdp_settings->KeyboardLayout = guac_settings->server_layout->freerdp_keyboard_layout;
 #endif
 
+    /* Performance flags */
+#ifdef LEGACY_RDPSETTINGS
+    rdp_settings->performance_flags = guac_rdp_get_performance_flags(guac_settings);
+#else
+    rdp_settings->PerformanceFlags = guac_rdp_get_performance_flags(guac_settings);
+#endif
+
+    /* Client name */
+    if (guac_settings->client_name != NULL) {
+#ifdef LEGACY_RDPSETTINGS
+        strncpy(rdp_settings->client_hostname, guac_settings->client_name,
+                RDP_CLIENT_HOSTNAME_SIZE - 1);
+#else
+        strncpy(rdp_settings->ClientHostname, guac_settings->client_name,
+                RDP_CLIENT_HOSTNAME_SIZE - 1);
+#endif
+    }
+
     /* Console */
 #ifdef LEGACY_RDPSETTINGS
     rdp_settings->console_session = guac_settings->console;
@@ -105,6 +170,32 @@ void guac_rdp_push_settings(guac_rdp_settings* guac_settings, freerdp* rdp) {
 #else
     rdp_settings->ConsoleSession = guac_settings->console;
     rdp_settings->RemoteConsoleAudio = guac_settings->console_audio;
+#endif
+
+    /* Audio */
+#ifdef LEGACY_RDPSETTINGS
+#ifdef HAVE_RDPSETTINGS_AUDIOPLAYBACK
+    rdp_settings->audio_playback = guac_settings->audio_enabled;
+#endif
+#else
+#ifdef HAVE_RDPSETTINGS_AUDIOPLAYBACK
+    rdp_settings->AudioPlayback = guac_settings->audio_enabled;
+#endif
+#endif
+
+    /* Device redirection */
+#ifdef LEGACY_RDPSETTINGS
+#ifdef HAVE_RDPSETTINGS_DEVICEREDIRECTION
+    rdp_settings->device_redirection =  guac_settings->audio_enabled
+                                     || guac_settings->drive_enabled
+                                     || guac_settings->printing_enabled;
+#endif
+#else
+#ifdef HAVE_RDPSETTINGS_DEVICEREDIRECTION
+    rdp_settings->DeviceRedirection =  guac_settings->audio_enabled
+                                    || guac_settings->drive_enabled
+                                    || guac_settings->printing_enabled;
+#endif
 #endif
 
     /* Security */
@@ -201,15 +292,27 @@ void guac_rdp_push_settings(guac_rdp_settings* guac_settings, freerdp* rdp) {
 #endif
     }
 
+#ifdef HAVE_RDPSETTINGS_SENDPRECONNECTIONPDU
+    /* Preconnection ID */
+    if (guac_settings->preconnection_id != -1) {
+        rdp_settings->NegotiateSecurityLayer = FALSE;
+        rdp_settings->SendPreconnectionPdu = TRUE;
+        rdp_settings->PreconnectionId = guac_settings->preconnection_id;
+    }
+
+    /* Preconnection BLOB */
+    if (guac_settings->preconnection_blob != NULL) {
+        rdp_settings->NegotiateSecurityLayer = FALSE;
+        rdp_settings->SendPreconnectionPdu = TRUE;
+        rdp_settings->PreconnectionBlob = guac_settings->preconnection_blob;
+    }
+#endif
+
     /* Order support */
 #ifdef LEGACY_RDPSETTINGS
     bitmap_cache = rdp_settings->bitmap_cache;
     rdp_settings->os_major_type = OSMAJORTYPE_UNSPECIFIED;
     rdp_settings->os_minor_type = OSMINORTYPE_UNSPECIFIED;
-#ifdef HAVE_RDPSETTINGS_FASTPATH
-    rdp_settings->fast_path_input = FALSE;
-    rdp_settings->fast_path_output = FALSE;
-#endif
     rdp_settings->desktop_resize = TRUE;
     rdp_settings->order_support[NEG_DSTBLT_INDEX] = TRUE;
     rdp_settings->order_support[NEG_PATBLT_INDEX] = FALSE; /* PATBLT not yet supported */
@@ -239,10 +342,6 @@ void guac_rdp_push_settings(guac_rdp_settings* guac_settings, freerdp* rdp) {
     bitmap_cache = rdp_settings->BitmapCacheEnabled;
     rdp_settings->OsMajorType = OSMAJORTYPE_UNSPECIFIED;
     rdp_settings->OsMinorType = OSMINORTYPE_UNSPECIFIED;
-#ifdef HAVE_RDPSETTINGS_FASTPATH
-    rdp_settings->FastPathInput = FALSE;
-    rdp_settings->FastPathOutput = FALSE;
-#endif
     rdp_settings->DesktopResize = TRUE;
     rdp_settings->OrderSupport[NEG_DSTBLT_INDEX] = TRUE;
     rdp_settings->OrderSupport[NEG_PATBLT_INDEX] = FALSE; /* PATBLT not yet supported */

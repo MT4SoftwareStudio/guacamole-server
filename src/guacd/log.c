@@ -21,6 +21,7 @@
  */
 
 #include "config.h"
+#include "log.h"
 
 #include <guacamole/client.h>
 #include <guacamole/error.h>
@@ -30,75 +31,91 @@
 #include <syslog.h>
 #include <unistd.h>
 
-/* Log prefix, defaulting to "guacd" */
-char log_prefix[64] = "guacd";
+int guacd_log_level = GUAC_LOG_INFO;
 
-void vguacd_log_info(const char* format, va_list args) {
+void vguacd_log(guac_client_log_level level, const char* format,
+        va_list args) {
+
+    const char* priority_name;
+    int priority;
+
+    char message[2048];
+
+    /* Don't bother if the log level is too high */
+    if (level > guacd_log_level)
+        return;
 
     /* Copy log message into buffer */
-    char message[2048];
     vsnprintf(message, sizeof(message), format, args);
 
+    /* Convert log level to syslog priority */
+    switch (level) {
+
+        /* Error log level */
+        case GUAC_LOG_ERROR:
+            priority = LOG_ERR;
+            priority_name = "ERROR";
+            break;
+
+        /* Warning log level */
+        case GUAC_LOG_WARNING:
+            priority = LOG_WARNING;
+            priority_name = "WARNING";
+            break;
+
+        /* Informational log level */
+        case GUAC_LOG_INFO:
+            priority = LOG_INFO;
+            priority_name = "INFO";
+            break;
+
+        /* Debug log level */
+        case GUAC_LOG_DEBUG:
+            priority = LOG_DEBUG;
+            priority_name = "DEBUG";
+            break;
+
+        /* Any unknown/undefined log level */
+        default:
+            priority = LOG_INFO;
+            priority_name = "UNKNOWN";
+            break;
+    }
+
     /* Log to syslog */
-    syslog(LOG_INFO, "%s", message);
+    syslog(priority, "%s", message);
 
     /* Log to STDERR */
-    fprintf(stderr, "%s[%i]: INFO:  %s\n", log_prefix, getpid(), message);
+    fprintf(stderr, GUACD_LOG_NAME "[%i]: %s:\t%s\n",
+            getpid(), priority_name, message);
 
 }
 
-void vguacd_log_error(const char* format, va_list args) {
-
-    /* Copy log message into buffer */
-    char message[2048];
-    vsnprintf(message, sizeof(message), format, args);
-
-    /* Log to syslog */
-    syslog(LOG_ERR, "%s", message);
-
-    /* Log to STDERR */
-    fprintf(stderr, "%s[%i]: ERROR: %s\n", log_prefix, getpid(), message);
-
-}
-
-void guacd_log_info(const char* format, ...) {
+void guacd_log(guac_client_log_level level, const char* format, ...) {
     va_list args;
     va_start(args, format);
-    vguacd_log_info(format, args);
+    vguacd_log(level, format, args);
     va_end(args);
 }
 
-void guacd_log_error(const char* format, ...) {
-    va_list args;
-    va_start(args, format);
-    vguacd_log_error(format, args);
-    va_end(args);
+void guacd_client_log(guac_client* client, guac_client_log_level level,
+        const char* format, va_list args) {
+    vguacd_log(level, format, args);
 }
 
-void guacd_client_log_info(guac_client* client, const char* format,
-        va_list args) {
-    vguacd_log_info(format, args);
-}
-
-void guacd_client_log_error(guac_client* client, const char* format,
-        va_list args) {
-    vguacd_log_error(format, args);
-}
-
-void guacd_log_guac_error(const char* message) {
+void guacd_log_guac_error(guac_client_log_level level, const char* message) {
 
     if (guac_error != GUAC_STATUS_SUCCESS) {
 
         /* If error message provided, include in log */
         if (guac_error_message != NULL)
-            guacd_log_error("%s: %s: %s",
+            guacd_log(level, "%s: %s",
                     message,
-                    guac_status_string(guac_error),
                     guac_error_message);
 
         /* Otherwise just log with standard status string */
         else
-            guacd_log_error("%s: %s",
+            guacd_log(level, "%s: %s",
                     message,
                     guac_status_string(guac_error));
 
@@ -106,24 +123,24 @@ void guacd_log_guac_error(const char* message) {
 
     /* Just log message if no status code */
     else
-        guacd_log_error("%s", message);
+        guacd_log(level, "%s", message);
 
 }
 
-void guacd_client_log_guac_error(guac_client* client, const char* message) {
+void guacd_client_log_guac_error(guac_client* client,
+        guac_client_log_level level, const char* message) {
 
     if (guac_error != GUAC_STATUS_SUCCESS) {
 
         /* If error message provided, include in log */
         if (guac_error_message != NULL)
-            guac_client_log_error(client, "%s: %s: %s",
+            guac_client_log(client, level, "%s: %s",
                     message,
-                    guac_status_string(guac_error),
                     guac_error_message);
 
         /* Otherwise just log with standard status string */
         else
-            guac_client_log_error(client, "%s: %s",
+            guac_client_log(client, level, "%s: %s",
                     message,
                     guac_status_string(guac_error));
 
@@ -131,7 +148,7 @@ void guacd_client_log_guac_error(guac_client* client, const char* message) {
 
     /* Just log message if no status code */
     else
-        guac_client_log_error(client, "%s", message);
+        guac_client_log(client, level, "%s", message);
 
 }
 
